@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="it"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Halloween Sport VR</title>
+<style>
+html,body{margin:0;height:100%;background:#0d0618;overflow:hidden;font-family:system-ui,sans-serif;color:#fff}
+#ui{position:fixed;inset:0;pointer-events:none;padding:env(safe-area-inset-top,0) 10px 10px}
+#ui *{text-shadow:0 1px 4px #000}
+#bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;pointer-events:auto}
+button{font:600 14px system-ui;border:2px solid #ff9a2e;background:#2a1146cc;color:#fff;border-radius:10px;padding:8px 12px;pointer-events:auto}
+#msg{position:fixed;left:10px;right:10px;bottom:74px;text-align:center;font-size:15px}
+#warn{color:#ffb4b4;font-size:13px;margin-top:6px}
+#end{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#000a;pointer-events:auto}
+#end div{background:#1b0b33;border:2px solid #ff9a2e;border-radius:16px;padding:18px;max-width:340px;text-align:center}
+</style>
+<script type="importmap">{"imports":{
+"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
+"rapier":"https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/+esm"}}</script>
+</head><body>
+<div id="ui"><b style="font-size:20px;color:#ff9a2e">🎃 Halloween Sport VR</b>
+<div id="bar"><button id="bMenu">Menu</button><button id="bPause">Pausa</button><button id="bScores">Punteggi</button></div>
+<div id="hint" style="font-size:13px;margin-top:6px"></div><div id="warn"></div></div>
+<div id="msg"></div>
+<div id="end"><div><h2 id="eT"></h2><p id="eP"></p><p id="eTip" style="font-size:13px;color:#ffd08a"></p>
+<button id="eAgain">Rigioca</button> <button id="eMenu">Menu</button></div></div>
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import * as RNS from 'rapier';
+const RAPIER = RNS.default ?? RNS;
+
+const PORTALS = [
+  { id: 'pingpong', label: 'Ping pong dei vampiri', color: 0xb36bff },
+  { id: 'basket', label: 'Tiri a canestro nel castello', color: 0xff8a1f },
+  { id: 'calcio', label: 'Rigori contro gli zombie', color: 0x5dff7a },
+  { id: 'climb', label: "Arrampicata della strega", color: 0xff4fd8 },
+];
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+const M = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.9, ...extra });
+
+function labelTexture(text, color) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = 'rgba(10,4,20,0.8)'; g.fillRect(0, 0, 512, 128);
+  g.strokeStyle = '#' + new THREE.Color(color).getHexString(); g.lineWidth = 6; g.strokeRect(3, 3, 506, 122);
+  g.fillStyle = '#fff'; g.font = 'bold 34px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  const words = text.split(' '); const mid = Math.ceil(words.length / 2);
+  g.fillText(words.slice(0, mid).join(' '), 256, 48); g.fillText(words.slice(mid).join(' '), 256, 88);
+  return new THREE.CanvasTexture(c);
+}
+
+const portalMat = (color) => new THREE.ShaderMaterial({
+  transparent: true, side: THREE.DoubleSide, depthWrite: false,
+  uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(color) } },
+  vertexShader: 'varying vec2 vUv; void main(){vUv=uv-0.5; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
+  fragmentShader: `varying vec2 vUv; uniform float uTime; uniform vec3 uColor;
+    void main(){ float r=length(vUv)*2.; float a=atan(vUv.y,vUv.x);
+      float s=0.5+0.5*sin(a*3.+r*9.-uTime*2.5);
+      gl_FragColor=vec4(uColor*(0.4+s*0.9), (1.-r)*0.85); }`,
+});
+
+function buildEnvironment(scene) {
+  scene.background = new THREE.Color(0x120820);
+  scene.fog = new THREE.FogExp2(0x1a0b2e, 0.022);
+
+  // Luci (poche, per visori autonomi)
+  scene.add(new THREE.HemisphereLight(0x8a6bff, 0x331a00, 0.7));
+  const moonLight = new THREE.DirectionalLight(0xbcd0ff, 0.9); moonLight.position.set(-30, 40, -40); scene.add(moonLight);
+  const torchA = new THREE.PointLight(0xff7a18, 40, 25); torchA.position.set(-6, 3, 4);
+  const torchB = new THREE.PointLight(0xa044ff, 40, 25); torchB.position.set(6, 3, 4);
+  scene.add(torchA, torchB);
+
+  // Luna piena + alone + stelle
+  const moon = new THREE.Mesh(new THREE.SphereGeometry(6, 24, 16), new THREE.MeshBasicMaterial({ color: 0xfff4d6, fog: false }));
+  moon.position.set(-30, 38, -90);
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(9, 24, 16), new THREE.MeshBasicMaterial({ color: 0xfff0b0, transparent: true, opacity: 0.15, fog: false, depthWrite: false }));
+  halo.position.copy(moon.position); scene.add(moon, halo);
+  const sp = new Float32Array(900);
+  for (let i = 0; i < 300; i++) { const u = rnd(0, Math.PI * 2), v = rnd(0.15, 1.3), R = 150; sp.set([R * Math.cos(u) * Math.cos(v), R * Math.sin(v), R * Math.sin(u) * Math.cos(v)], i * 3); }
+  const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.BufferAttribute(sp, 3));
+  scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ size: 0.8, color: 0xffffff, fog: false })));
+
+  // Terreno e palestra (piattaforma circolare con pilastri e torce)
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(90, 48), M(0x1c1428)); ground.rotation.x = -Math.PI / 2; scene.add(ground);
+  const floor = new THREE.Mesh(new THREE.CylinderGeometry(12, 12.5, 0.4, 48), M(0x3a2f4a, { roughness: 0.6 })); floor.position.y = -0.2; scene.add(floor);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(11, 0.08, 6, 64), new THREE.MeshBasicMaterial({ color: 0xff8a1f })); ring.rotation.x = Math.PI / 2; ring.position.y = 0.02; scene.add(ring);
+  const pillarGeo = new THREE.CylinderGeometry(0.35, 0.45, 3.5, 8), flameGeo = new THREE.SphereGeometry(0.22, 8, 6);
+  const flameMat = new THREE.MeshBasicMaterial({ color: 0xffa030 }); const stone = M(0x2a2236);
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2, x = Math.cos(a) * 12, z = Math.sin(a) * 12;
+    const p = new THREE.Mesh(pillarGeo, stone); p.position.set(x, 1.75, z);
+    const f = new THREE.Mesh(flameGeo, flameMat); f.position.set(x, 3.8, z); scene.add(p, f);
+  }
+
+  // Castello gotico
+  const castle = new THREE.Group(); castle.position.set(0, 0, -50);
+  const wall = M(0x2b2238), roof = M(0x4a1d6b), winMat = new THREE.MeshBasicMaterial({ color: 0xff9a2e });
+  const keep = new THREE.Mesh(new THREE.BoxGeometry(16, 20, 12), wall); keep.position.y = 10; castle.add(keep);
+  const towerGeo = new THREE.CylinderGeometry(2.6, 3, 28, 10), coneGeo = new THREE.ConeGeometry(3.4, 8, 10);
+  [[-11, -4], [11, -4], [-11, 4], [11, 4]].forEach(([x, z], i) => {
+    const h = i < 2 ? 1 : 0.8;
+    const t = new THREE.Mesh(towerGeo, wall); t.scale.y = h; t.position.set(x, 14 * h, z);
+    const c = new THREE.Mesh(coneGeo, roof); c.position.set(x, 28 * h + 4, z); castle.add(t, c);
+  });
+  const merlon = new THREE.InstancedMesh(new THREE.BoxGeometry(1.2, 1.4, 1.2), wall, 14); const m4 = new THREE.Matrix4();
+  for (let i = 0; i < 14; i++) { m4.setPosition(-7.5 + i * 1.15, 20.7, 6); merlon.setMatrixAt(i, m4); } castle.add(merlon);
+  const win = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 2.2), winMat, 10);
+  for (let i = 0; i < 10; i++) { m4.setPosition(-6 + (i % 5) * 3, 8 + Math.floor(i / 5) * 6, 6.05); win.setMatrixAt(i, m4); } castle.add(win);
+  scene.add(castle);
+
+  // Zucche luminose (istanziate)
+  const pumpGeo = new THREE.SphereGeometry(0.5, 12, 8); pumpGeo.scale(1, 0.8, 1);
+  const pumps = new THREE.InstancedMesh(pumpGeo, new THREE.MeshStandardMaterial({ color: 0xff6a00, emissive: 0xff5500, emissiveIntensity: 0.9 }), 45);
+  const q = new THREE.Quaternion(), sc = new THREE.Vector3(), pos = new THREE.Vector3();
+  for (let i = 0; i < 45; i++) {
+    const a = rnd(0, Math.PI * 2), r = rnd(13.5, 40), s = rnd(0.6, 1.8);
+    pos.set(Math.cos(a) * r, 0.4 * s, Math.sin(a) * r - (r > 25 ? 0 : 0)); q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rnd(0, 6));
+    sc.set(s, s, s); pumps.setMatrixAt(i, m4.compose(pos, q, sc));
+  } scene.add(pumps);
+
+  // Alberi spettrali (tronchi + rami in una sola InstancedMesh)
+  const branchGeo = new THREE.CylinderGeometry(0.06, 0.25, 1, 6); branchGeo.translate(0, 0.5, 0);
+  const trees = new THREE.InstancedMesh(branchGeo, M(0x120d18), 25 * 5); let n = 0; const e = new THREE.Euler();
+  for (let i = 0; i < 25; i++) {
+    const a = rnd(0, Math.PI * 2), r = rnd(18, 55), x = Math.cos(a) * r, z = Math.sin(a) * r - 5, h = rnd(5, 9);
+    trees.setMatrixAt(n++, m4.compose(pos.set(x, 0, z), q.identity(), sc.set(1.4, h, 1.4)));
+    for (let b = 0; b < 4; b++) {
+      e.set(rnd(0.6, 1.2), rnd(0, 6.28), rnd(-0.5, 0.5)); q.setFromEuler(e);
+      trees.setMatrixAt(n++, m4.compose(pos.set(x, h * rnd(0.55, 0.9), z), q, sc.set(0.7, rnd(2, 3.5), 0.7)));
+    }
+  } scene.add(trees);
+
+  // Pipistrelli (istanziati, ali animate con scala)
+  const bg = new THREE.BufferGeometry();
+  bg.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-0.5,0,0, 0,0,0.15, -0.1,0,-0.3, 0.5,0,0, 0,0,0.15, 0.1,0,-0.3]), 3)); bg.computeVertexNormals();
+  const bats = new THREE.InstancedMesh(bg, new THREE.MeshBasicMaterial({ color: 0x050308, side: THREE.DoubleSide }), 24);
+  const batData = Array.from({ length: 24 }, () => ({ r: rnd(8, 30), y: rnd(5, 18), sp: rnd(0.2, 0.6), ph: rnd(0, 6.28) }));
+  scene.add(bats);
+
+  // Fantasmi (profilo Lathe, trasparenti)
+  const prof = [[0,0],[0.5,0.1],[0.6,0.5],[0.55,1],[0.45,1.5],[0.2,1.9],[0,2]].map(([x,y]) => new THREE.Vector2(x, y));
+  const ghostGeo = new THREE.LatheGeometry(prof, 14);
+  const ghostMat = new THREE.MeshBasicMaterial({ color: 0xe8f0ff, transparent: true, opacity: 0.5 }), eyeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+  const eyeGeo = new THREE.SphereGeometry(0.07, 6, 6);
+  const ghosts = Array.from({ length: 6 }, (_, i) => {
+    const g = new THREE.Group(); g.add(new THREE.Mesh(ghostGeo, ghostMat));
+    [-0.15, 0.15].forEach((x) => { const eye = new THREE.Mesh(eyeGeo, eyeMat); eye.position.set(x, 1.5, 0.4); g.add(eye); });
+    g.userData = { r: rnd(14, 26), sp: rnd(0.1, 0.25), ph: i * 1.05 }; scene.add(g); return g;
+  });
+
+  // Portali interattivi
+  const portals = PORTALS.map((p, i) => {
+    const a = THREE.MathUtils.degToRad(-60 + i * 40), r = 9;
+    const g = new THREE.Group(); g.position.set(Math.sin(a) * r, 0, -Math.cos(a) * r); g.lookAt(0, 0, 0);
+    const frame = new THREE.Mesh(new THREE.TorusGeometry(1.5, 0.15, 8, 32), new THREE.MeshBasicMaterial({ color: p.color })); frame.position.y = 1.8;
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(1.5, 32), portalMat(p.color)); disc.position.y = 1.8; disc.userData.portalId = p.id;
+    const label = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 0.6), new THREE.MeshBasicMaterial({ map: labelTexture(p.label, p.color), transparent: true })); label.position.y = 3.9;
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.4, 0.2, 16), M(p.color, { emissive: p.color, emissiveIntensity: 0.4 })); base.position.y = 0.1;
+    g.add(frame, disc, label, base); scene.add(g); return { ...p, group: g, disc };
+  });
+
+  function update(t) {
+    portals.forEach((p) => { p.disc.material.uniforms.uTime.value = t; p.group.position.y = 0.05 * Math.sin(t * 2 + p.color); });
+    torchA.intensity = 36 + 6 * Math.sin(t * 9); torchB.intensity = 36 + 6 * Math.sin(t * 7 + 1);
+    batData.forEach((b, i) => {
+      const a = t * b.sp + b.ph, f = 0.5 + 0.5 * Math.sin(t * 14 + i);
+      pos.set(Math.cos(a) * b.r, b.y + Math.sin(t + i) , Math.sin(a) * b.r - 10);
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -a); bats.setMatrixAt(i, m4.compose(pos, q, sc.set(1.5, 1 + f * 3, 1.5)));
+    }); bats.instanceMatrix.needsUpdate = true;
+    ghosts.forEach((g) => { const a = t * g.userData.sp + g.userData.ph; g.position.set(Math.cos(a) * g.userData.r, 1.5 + Math.sin(t * 1.5 + a), Math.sin(a) * g.userData.r - 8); g.rotation.y = -a; });
+  }
+  return { portals, update };
+}
+
+// ===== BLOCCO 2: fisica Rapier, menu, HUD, ping pong =====
+const $ = (id) => document.getElementById(id);
+await RAPIER.init();
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight); renderer.xr.enabled = true; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.15;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 250);
+const rig = new THREE.Group(); rig.add(camera); scene.add(rig); camera.position.y = 1.6; rig.position.set(0, 0, 4);
+const env = buildEnvironment(scene);
+
+// ===== GRAFICA MIGLIORATA: texture procedurali, cielo, atmosfera (leggera, adatta ai visori) =====
+const mkTex = (w, h, fn, rep) => { const c = document.createElement('canvas'); c.width = w; c.height = h; fn(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; if (rep) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rep[0], rep[1]); } return t; };
+const speck = (g, w, h, n, a) => { for (let i = 0; i < n; i++) { g.fillStyle = Math.random() < 0.5 ? `rgba(0,0,0,${a})` : `rgba(255,255,255,${a * 0.6})`; g.fillRect(Math.random() * w, Math.random() * h, 2, 2); } };
+const glowTex = mkTex(64, 64, (g) => { const r = g.createRadialGradient(32, 32, 0, 32, 32, 32); r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(0.3, 'rgba(255,255,255,.35)'); r.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = r; g.fillRect(0, 0, 64, 64); });
+const glow = (color, size, op = 0.8) => { const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false })); s.scale.setScalar(size); return s; };
+const stoneTex = mkTex(512, 512, (g, w, h) => { for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) { const v = 50 + Math.random() * 25; g.fillStyle = `rgb(${v + 12},${v},${v + 22})`; g.fillRect(x * 64, y * 64, 64, 64); }
+  g.strokeStyle = '#120a1c'; g.lineWidth = 4; for (let i = 0; i <= 8; i++) { g.beginPath(); g.moveTo(i * 64, 0); g.lineTo(i * 64, h); g.moveTo(0, i * 64); g.lineTo(w, i * 64); g.stroke(); } speck(g, w, h, 3000, 0.25); }, [5, 5]);
+const brickTex = mkTex(256, 256, (g, w, h) => { g.fillStyle = '#0c0714'; g.fillRect(0, 0, w, h); for (let r = 0; r < 8; r++) for (let c = -1; c < 4; c++) { const v = 90 + Math.random() * 60; g.fillStyle = `rgb(${v},${v - 8},${v + 14})`; g.fillRect(c * 64 + (r % 2) * 32 + 2, r * 32 + 2, 60, 28); } speck(g, w, h, 2500, 0.25); }, [3, 4]);
+const moonTex = mkTex(256, 256, (g, w, h) => { g.fillStyle = '#fff4d6'; g.fillRect(0, 0, w, h); for (let i = 0; i < 40; i++) { g.fillStyle = `rgba(150,135,110,${0.15 + Math.random() * 0.25})`; g.beginPath(); g.arc(Math.random() * w, Math.random() * h, 5 + Math.random() * 22, 0, 7); g.fill(); } });
+const facePath = (g) => { g.beginPath(); g.moveTo(88, 40); g.lineTo(108, 62); g.lineTo(68, 62); g.closePath(); g.moveTo(168, 40); g.lineTo(188, 62); g.lineTo(148, 62); g.closePath();
+  g.moveTo(80, 80); g.quadraticCurveTo(128, 124, 176, 80); g.lineTo(160, 78); g.lineTo(144, 90); g.lineTo(128, 80); g.lineTo(112, 90); g.lineTo(96, 78); g.closePath(); };
+const pumpMat = new THREE.MeshStandardMaterial({ roughness: 0.6, emissive: 0xffffff, emissiveIntensity: 1.5,
+  map: mkTex(256, 128, (g, w, h) => { g.fillStyle = '#ff7a10'; g.fillRect(0, 0, w, h); for (let i = 0; i < 8; i++) { g.fillStyle = 'rgba(120,40,0,.4)'; g.fillRect(i * 32 - 2, 0, 5, h); } g.fillStyle = '#301000'; facePath(g); g.fill(); }),
+  emissiveMap: mkTex(256, 128, (g, w, h) => { g.fillStyle = '#3a1200'; g.fillRect(0, 0, w, h); g.fillStyle = '#ffd060'; facePath(g); g.fill(); }) });
+function sky() { const s = new THREE.Mesh(new THREE.SphereGeometry(200, 24, 16), new THREE.ShaderMaterial({ side: THREE.BackSide, depthWrite: false, fog: false,
+  vertexShader: 'varying float h;void main(){h=normalize(position).y;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
+  fragmentShader: 'varying float h;void main(){vec3 top=vec3(.02,.01,.06),mid=vec3(.22,.08,.32),hor=vec3(.95,.38,.1);float t=clamp(h,0.,1.);vec3 c=mix(hor,mid,smoothstep(0.,.18,t));c=mix(c,top,smoothstep(.15,.8,t));gl_FragColor=vec4(c,1.);}' })); s.renderOrder = -1; return s; }
+function enhance(scene, env) {
+  scene.fog.color.set(0x341450); scene.add(sky());
+  const flames = []; let pumps = null;
+  scene.traverse((o) => { const t = o.geometry && o.geometry.type, p = (o.geometry && o.geometry.parameters) || {};
+    if (t === 'CircleGeometry' && p.radius === 90) o.material = new THREE.MeshStandardMaterial({ roughness: 1, map: mkTex(256, 256, (g, w, h) => { g.fillStyle = '#1d1230'; g.fillRect(0, 0, w, h); speck(g, w, h, 5000, 0.3); }, [40, 40]) });
+    else if (t === 'CylinderGeometry' && p.radiusTop === 12) o.material = new THREE.MeshStandardMaterial({ map: stoneTex, roughness: 0.55, metalness: 0.1 });
+    else if (t === 'SphereGeometry' && p.radius === 6) { o.material.map = moonTex; o.material.color.set(0xffffff); o.material.needsUpdate = true; }
+    else if (t === 'BoxGeometry' && p.width === 16 && p.height === 20) { o.material.map = brickTex; o.material.color.set(0xc8b8d8); o.material.needsUpdate = true; }
+    else if (o.isInstancedMesh && t === 'SphereGeometry' && o.count === 45) { o.material = pumpMat; pumps = o; }
+    else if (t === 'SphereGeometry' && p.radius === 0.22) flames.push(o); });
+  flames.forEach((f) => { const s = glow(0xff8a20, 1.8); s.position.copy(f.position); scene.add(s); });
+  if (pumps) { const sg = new THREE.CylinderGeometry(0.05, 0.07, 0.18, 6); sg.translate(0, 0.42, 0); const st = new THREE.InstancedMesh(sg, new THREE.MeshStandardMaterial({ color: 0x3a5a1a }), 45); const m4 = new THREE.Matrix4();
+    for (let i = 0; i < 45; i++) { pumps.getMatrixAt(i, m4); st.setMatrixAt(i, m4); } scene.add(st); }
+  const fogTex = mkTex(256, 256, (g) => { for (let i = 0; i < 40; i++) { const x = Math.random() * 256, y = Math.random() * 256, r = 30 + Math.random() * 50, gr = g.createRadialGradient(x, y, 0, x, y, r); gr.addColorStop(0, 'rgba(200,170,255,.22)'); gr.addColorStop(1, 'rgba(200,170,255,0)'); g.fillStyle = gr; g.fillRect(0, 0, 256, 256); } });
+  const layers = [0.3, 0.9].map((y, i) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.MeshBasicMaterial({ map: fogTex, transparent: true, depthWrite: false, opacity: 0.7 - 0.2 * i })); m.rotation.x = -Math.PI / 2; m.position.y = y; scene.add(m); return m; });
+  const N = 150, ep = new Float32Array(N * 3), ph = Array.from({ length: N }, () => [Math.random(), 0.15 + Math.random() * 0.25, (Math.random() - 0.5) * 60, (Math.random() - 0.5) * 55 - 10]);
+  const eg = new THREE.BufferGeometry(); eg.setAttribute('position', new THREE.BufferAttribute(ep, 3));
+  scene.add(new THREE.Points(eg, new THREE.PointsMaterial({ map: glowTex, size: 0.28, color: 0xff9a40, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false })));
+  const spikes = env.portals.map((p) => { const gl = glow(p.color, 5.5, 0.55); gl.position.set(0, 1.8, -0.15); p.group.add(gl);
+    const sg = new THREE.Group(); sg.position.y = 1.8; const cg = new THREE.ConeGeometry(0.07, 0.3, 5), cm = new THREE.MeshBasicMaterial({ color: p.color });
+    for (let k = 0; k < 12; k++) { const a = (k / 12) * Math.PI * 2, c = new THREE.Mesh(cg, cm); c.position.set(Math.cos(a) * 1.85, Math.sin(a) * 1.85, 0); c.rotation.z = a - Math.PI / 2; sg.add(c); }
+    p.group.add(sg); return sg; });
+  return { update(t) { layers.forEach((l, i) => (l.rotation.z = t * 0.02 * (i ? -1 : 1))); spikes.forEach((s, i) => (s.rotation.z = t * 0.3 * (i % 2 ? -1 : 1)));
+    for (let i = 0; i < N; i++) { const q = ph[i]; ep[i * 3] = q[2] + Math.sin(t * 0.7 + i) * 0.6; ep[i * 3 + 1] = ((q[0] + t * q[1] * 0.2) % 1) * 9; ep[i * 3 + 2] = q[3]; } eg.attributes.position.needsUpdate = true; } };
+}
+function tableMat() { return new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.1, map: mkTex(256, 512, (g, w, h) => { g.fillStyle = '#14507a'; g.fillRect(0, 0, w, h); speck(g, w, h, 1500, 0.12); g.strokeStyle = '#fff'; g.lineWidth = 8; g.strokeRect(4, 4, w - 8, h - 8); g.lineWidth = 3; g.beginPath(); g.moveTo(w / 2, 0); g.lineTo(w / 2, h); g.stroke(); }) }); }
+function arenaRug() { const m = new THREE.Mesh(new THREE.CircleGeometry(3.2, 48), new THREE.MeshStandardMaterial({ roughness: 1, map: mkTex(256, 256, (g) => { const r = g.createRadialGradient(128, 128, 10, 128, 128, 128); r.addColorStop(0, '#3a0f4d'); r.addColorStop(1, '#14061f'); g.fillStyle = r; g.fillRect(0, 0, 256, 256); g.strokeStyle = '#ff9a2e'; g.lineWidth = 5; [120, 104, 70].forEach((R) => { g.beginPath(); g.arc(128, 128, R, 0, 7); g.stroke(); }); }) })); m.rotation.x = -Math.PI / 2; m.position.set(0, 0.01, -1.8); return m; }
+function paddleMesh(col) { const g = new THREE.Group(), wood = new THREE.MeshStandardMaterial({ color: 0xc9945a, roughness: 0.7 });
+  const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.014, 24), new THREE.MeshStandardMaterial({ color: col, roughness: 0.4, emissive: col, emissiveIntensity: 0.25 })); disc.rotation.x = Math.PI / 2;
+  const back = new THREE.Mesh(new THREE.CylinderGeometry(0.158, 0.158, 0.012, 24), wood); back.rotation.x = Math.PI / 2; back.position.z = -0.012;
+  const h = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.12, 0.025), wood); h.position.set(0, -0.22, -0.006); g.add(disc, back, h); return g; }
+const fx = enhance(scene, env);
+document.body.appendChild(VRButton.createButton(renderer));
+if (!navigator.xr) $('warn').textContent = '⚠ WebXR non disponibile (o pagina non HTTPS): usa la modalità desktop.';
+else navigator.xr.isSessionSupported('immersive-vr').then((ok) => { if (!ok) $('warn').textContent = '⚠ Questo dispositivo non supporta la VR: usa la modalità desktop.'; });
+
+// Fisica
+const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 }); const STEP = 1 / 120; world.timestep = STEP;
+world.createCollider(RAPIER.ColliderDesc.cuboid(12, 0.2, 12).setTranslation(0, -0.2, 0).setRestitution(0.5));
+let bodies = [], acc = 0;
+const body = (desc) => { const b = world.createRigidBody(desc); bodies.push(b); return b; };
+
+// Pannello 3D e pulsanti (funzionano con mouse e controller VR)
+function textMesh(w, h, cw, ch) {
+  const c = document.createElement('canvas'); c.width = cw; c.height = ch; const g = c.getContext('2d'); const tex = new THREE.CanvasTexture(c);
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+  m.draw = (lines, size = 44) => { g.clearRect(0, 0, cw, ch); g.fillStyle = 'rgba(10,4,20,.88)'; g.fillRect(0, 0, cw, ch); g.strokeStyle = '#ff9a2e'; g.lineWidth = 6; g.strokeRect(3, 3, cw - 6, ch - 6);
+    g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = `bold ${size}px system-ui`;
+    lines.forEach((l, i) => g.fillText(l, cw / 2, ch / 2 + (i - (lines.length - 1) / 2) * size * 1.3)); tex.needsUpdate = true; };
+  return m;
+}
+const ui3d = new THREE.Group(); ui3d.visible = false; scene.add(ui3d);
+const panel = textMesh(2, 1, 512, 256); panel.position.set(0, 2.1, -4.3); ui3d.add(panel);
+const buttons = [];
+function mkBtn(label, x, fn) { const b = textMesh(0.55, 0.18, 256, 80); b.draw([label], 30); b.position.set(x, 1.35, -4.3); b.userData.fn = fn; ui3d.add(b); buttons.push(b); }
+let G = null, paused = false, mode = 'menu', stage = null;
+mkBtn('PAUSA', -0.65, () => togglePause()); mkBtn('RIGIOCA', 0, () => G && start(G.id)); mkBtn('MENU', 0.65, () => toMenu());
+
+// Punteggi
+const store = { get() { try { return JSON.parse(localStorage.getItem('hsv') || '{}'); } catch { return {}; } }, set(v) { try { localStorage.setItem('hsv', JSON.stringify(v)); } catch {} } };
+const TIPS = { climb: 'L\'arrampicata sviluppa forza, equilibrio e pianificazione. Muoviti con calma, un appiglio alla volta, e riposa le braccia!', calcio: 'Il calcio allena precisione e freddezza. Respira, scegli l\'angolo e calcia con decisione!', pingpong: 'Il ping pong allena riflessi e coordinazione occhio-mano. Ricorda di riscaldare polsi e spalle!', basket: 'Il basket sviluppa coordinazione, salto e precisione. Piega le gambe e usa tutto il corpo nel tiro!' };
+const NAMES = { climb: 'Arrampicata della strega', calcio: 'Rigori contro gli zombie', pingpong: 'Ping pong dei vampiri', basket: 'Basket nel castello' };
+
+// Controller VR
+const ctrls = [0, 1].map((i) => { const c = renderer.xr.getController(i); rig.add(c);
+  c.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -8)]), new THREE.LineBasicMaterial({ color: 0xffa040 })));
+  c.addEventListener('connected', (e) => { c.userData.hand = e.data.handedness; c.userData.isHand = !!e.data.hand; c.userData.gp = e.data.gamepad; });
+  c.addEventListener('select', () => { const o = new THREE.Vector3(), d = new THREE.Vector3(0, 0, -1); c.getWorldPosition(o); d.transformDirection(c.matrixWorld); pick(o, d); }); return c; });
+
+// Mani e controller: modelli visibili, posizione "di presa", velocità del movimento e vibrazione
+const hands = [0, 1].map((i) => { const h = renderer.xr.getHand(i); rig.add(h); try { h.add(new XRHandModelFactory().createHandModel(h, 'spheres')); } catch {} return h; });
+[0, 1].forEach((i) => { const g = renderer.xr.getControllerGrip(i); rig.add(g); try { g.add(new XRControllerModelFactory().createControllerModel(g)); } catch {} });
+function handPos(i, kind = 'point', out = new THREE.Vector3()) { // con il tracciamento delle mani usa le dita/polso, con i controller la loro posizione
+  const c = ctrls[i], j = hands[i] && hands[i].joints;
+  if (c.userData.isHand && j) { const jt = j[kind === 'paddle' ? 'wrist' : 'index-finger-tip']; if (jt) return jt.getWorldPosition(out); }
+  return c.getWorldPosition(out);
+}
+const hv = [0, 1].map(() => ({ p: new THREE.Vector3(), v: new THREE.Vector3(), ok: false }));
+function trackHands(dt) { hv.forEach((s, i) => { const p = handPos(i, 'paddle'); if (s.ok && dt > 0) s.v.lerp(p.clone().sub(s.p).divideScalar(Math.max(dt, 1e-3)), 0.5); s.p.copy(p); s.ok = true; }); }
+function buzz(c, st = 0.5, ms = 40) { try { const gp = c && c.userData.gp, a = gp && gp.hapticActuators && gp.hapticActuators[0]; if (a && a.pulse) a.pulse(st, ms); else if (gp && gp.vibrationActuator) gp.vibrationActuator.playEffect('dual-rumble', { duration: ms, strongMagnitude: st, weakMagnitude: st }); } catch {} }
+const ray = new THREE.Raycaster();
+function pick(o, d) {
+  ray.set(o, d);
+  if (mode === 'menu') { const h = ray.intersectObjects(env.portals.map((p) => p.disc))[0]; if (h) start(h.object.userData.portalId); }
+  else { const h = ray.intersectObjects(buttons)[0]; if (h) h.object.userData.fn(); }
+}
+function say(t) { $('msg').textContent = t; }
+
+// ---- Navigazione ----
+function clearGame() { bodies.forEach((b) => world.removeRigidBody(b)); bodies = []; if (stage) { scene.remove(stage); stage = null; } }
+function toMenu() { clearGame(); G = null; paused = false; mode = 'menu'; ui3d.visible = false; $('end').style.display = 'none';
+  env.portals.forEach((p) => (p.group.visible = true)); rig.position.set(0, 0, 4); camera.rotation.x = 0; say('Scegli un portale (click o raggio del controller).'); $('hint').textContent = 'Trascina per guardare · WASD per muoverti'; }
+function togglePause() { if (!G || G.over) return; paused = !paused; $('bPause').textContent = paused ? 'Riprendi' : 'Pausa'; drawPanel(); }
+function start(id) {
+  if (!['pingpong', 'basket', 'calcio', 'climb'].includes(id)) return;
+  clearGame(); paused = false; $('bPause').textContent = 'Pausa'; $('end').style.display = 'none';
+  mode = 'game'; ui3d.visible = true; env.portals.forEach((p) => (p.group.visible = false));
+  rig.position.set(0, 0, 0.3); rig.rotation.y = 0; camera.rotation.x = -0.3; say(''); $('hint').textContent = 'Muovi il mouse (o il controller) per muovere la racchetta';
+  ui3d.position.set(0, 0, 0); ui3d.rotation.set(0, 0, 0); stage = new THREE.Group(); scene.add(stage); if (id === 'basket') initBasket(); else if (id === 'calcio') initCalcio(); else if (id === 'climb') initClimb(); else initPingPong();
+}
+function drawPanel() {
+  if (!G) return; panel.draw(paused ? ['PAUSA'] : G.lines ? G.lines() : [NAMES[G.id].toUpperCase(), `Tu ${G.ps} – ${G.as} Vampiro`, 'Primo a 7 punti'], 40);
+}
+function finish(win) {
+  G.over = true; const s = store.get(); const r = s[G.id] || { wins: 0, best: 0, played: 0 }; r.played++; if (win) { r.wins++; r.best = Math.max(r.best, G.ps - G.as); } s[G.id] = r; store.set(s);
+  panel.draw([win ? 'HAI VINTO! 🎉' : 'HAI PERSO 💀', `${G.ps} – ${G.as}`], 44);
+  $('eT').textContent = win ? 'Hai vinto!' : 'Il vampiro vince!'; $('eP').textContent = `Punteggio finale: ${G.ps} – ${G.as}`; $('eTip').textContent = TIPS[G.id]; $('end').style.display = 'flex';
+}
+
+// ---- PING PONG ----
+function initPingPong() {
+  const S = Math.SQRT1_2, ZC = -2.2;
+  G = { id: 'pingpong', ps: 0, as: 0, serveT: 1.2, over: false, last: null, bounced: false, cd: 0, idle: 0, pvy: 0, mouse: new THREE.Vector3(0, 1, -1), pPrev: new THREE.Vector3(0, 1, -1), pv: new THREE.Vector3(), ai: new THREE.Vector3(0, 1, -3.7) };
+  const top = new THREE.Mesh(new THREE.BoxGeometry(1.525, 0.04, 2.74), tableMat()); top.position.set(0, 0.74, ZC);
+  const line = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.005, 2.74), new THREE.MeshBasicMaterial({ color: 0xffffff })); line.position.set(0, 0.762, ZC);
+  const net = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.15, 0.01), new THREE.MeshStandardMaterial({ color: 0xdddddd, transparent: true, opacity: 0.8 })); net.position.set(0, 0.8375, ZC);
+  stage.add(top, line, net, arenaRug());
+  [[-0.7, -1], [0.7, -1], [-0.7, 1], [0.7, 1]].forEach(([x, z]) => { const l = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.72, 0.06), new THREE.MeshStandardMaterial({ color: 0x222222 })); l.position.set(x, 0.36, ZC + z * 1.2); stage.add(l); });
+  const tb = body(RAPIER.RigidBodyDesc.fixed()); world.createCollider(RAPIER.ColliderDesc.cuboid(0.7625, 0.02, 1.37).setTranslation(0, 0.74, ZC).setRestitution(0.85), tb);
+  world.createCollider(RAPIER.ColliderDesc.cuboid(0.9, 0.075, 0.01).setTranslation(0, 0.8375, ZC).setRestitution(0.3), tb);
+  const mkPad = (col) => { const b = body(RAPIER.RigidBodyDesc.kinematicPositionBased());
+    world.createCollider(RAPIER.ColliderDesc.cylinder(0.01, 0.16).setRotation({ x: S, y: 0, z: 0, w: S }).setRestitution(0.9), b);
+    const m = paddleMesh(col);
+    const g = new THREE.Group(); g.add(m); stage.add(g); return { b, g }; };
+  G.pp = mkPad(0xa044ff); G.ap = mkPad(0xcc1122);
+  G.ball = body(RAPIER.RigidBodyDesc.dynamic().setCcdEnabled(true).setLinearDamping(0.02).setTranslation(0, 3, ZC));
+  world.createCollider(RAPIER.ColliderDesc.ball(0.05).setRestitution(0.85).setDensity(0.4), G.ball); G.ball.setEnabled(false);
+  G.bm = new THREE.Mesh(new THREE.SphereGeometry(0.05, 12, 8), new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffaa55, emissiveIntensity: 0.6 })); stage.add(G.bm);
+  if (renderer.xr.isPresenting) $('hint').textContent = 'Muovi il controller (o la mano) come una racchetta: inclinalo per mirare, colpisci forte per più potenza';
+  drawPanel();
+}
+const rr = (a, b) => a + Math.random() * (b - a), cl = (v, a, b) => Math.min(b, Math.max(a, v));
+function launch(b, from, tx, tz, sy) { const t = (sy + Math.sqrt(sy * sy + 19.6 * Math.max(0, from.y - 0.81))) / 9.8; b.setLinvel({ x: (tx - from.x) / t, y: sy, z: (tz - from.z) / t }, true); }
+function ppUpdate(dt) {
+  const b = G.ball; G.cd -= dt;
+  // racchetta giocatore
+  let tg = G.mouse; const vr = renderer.xr.isPresenting; let aimX = 0, aimY = 0;
+  if (vr) { const ci = Math.max(0, ctrls.findIndex((c) => c.userData.hand === 'right')), c = ctrls[ci], f = new THREE.Vector3(0, 0, -1).applyQuaternion(c.getWorldQuaternion(new THREE.Quaternion()));
+    G.ci = ci; G.hc = c; tg = handPos(ci, 'paddle'); aimX = cl(f.x * 2, -0.65, 0.65); aimY = f.y; G.pp.g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), f); }
+  else G.pp.g.quaternion.identity();
+  tg = new THREE.Vector3(cl(tg.x, -1.3, 1.3), cl(tg.y, 0.7, 1.9), cl(tg.z, -1.6, vr ? -0.15 : -0.4));
+  G.pv.copy(tg).sub(G.pPrev).divideScalar(Math.max(dt, 1e-3)); G.pPrev.copy(tg); if (vr) G.pv.copy(hv[G.ci].v);
+  G.pp.b.setNextKinematicTranslation(tg); G.pp.g.position.copy(tg);
+  // IA: segue la palla con velocità limitata (battibile)
+  const bt = b.translation(), bv = b.linvel();
+  const tx = G.ai.x, goX = bv.z < 0 && b.isEnabled() ? bt.x : 0, goY = bv.z < 0 && b.isEnabled() ? cl(bt.y, 0.85, 1.4) : 1.0, sp = 0.95 * dt;
+  G.ai.x += cl(goX - tx, -sp, sp); G.ai.y += cl(goY - G.ai.y, -sp, sp); G.ai.z = -3.7;
+  G.ap.b.setNextKinematicTranslation(G.ai); G.ap.g.position.copy(G.ai);
+  // serve
+  if (G.serveT > 0) { G.serveT -= dt; if (G.serveT <= 0) { b.setEnabled(true); b.setTranslation({ x: rr(-0.3, 0.3), y: 1.0, z: -3.5 }, true); b.setAngvel({ x: 0, y: 0, z: 0 }, true); launch(b, { x: 0, y: 1.0 }, rr(-0.5, 0.5), rr(-1.8, -1.1), 2.2); G.last = 'ai'; G.bounced = false; } G.bm.visible = b.isEnabled(); return; }
+  acc += dt; let n = 0; while (acc >= STEP && n++ < 4) { world.step(); acc -= STEP; }
+  const p = b.translation(), v = b.linvel(); G.bm.position.set(p.x, p.y, p.z); G.bm.visible = true;
+  // rimbalzo sul tavolo
+  if (G.pvy < 0 && v.y > 0 && p.y < 0.9 && Math.abs(p.x) < 0.82 && p.z > -3.6 && p.z < -0.8) { const side = p.z > -2.2 ? 'player' : 'ai'; if ((G.last === 'player' && side === 'ai') || (G.last === 'ai' && side === 'player')) G.bounced = true; }
+  G.pvy = v.y;
+  // colpi (la fisica Rapier gestisce l'urto; qui si guida la traiettoria per renderla giocabile)
+  if (G.cd <= 0 && G.bounced) {
+    if (G.last === 'ai' && Math.hypot(p.x - tg.x, p.y - tg.y, p.z - tg.z) < (vr ? 0.32 : 0.25)) { G.last = 'player'; G.bounced = false; G.cd = 0.3; if (vr) { const fw = Math.max(0, -G.pv.z); launch(b, p, cl(aimX + G.pv.x * 0.25 + rr(-0.1, 0.1), -0.65, 0.65), -(2.6 + cl(fw * 0.25, 0, 0.9)), cl(2.1 + aimY * 1.5 + G.pv.y * 0.15, 1.6, 3.2)); buzz(G.hc, Math.min(1, 0.4 + fw * 0.15), 50); } else launch(b, p, cl(G.pv.x * 0.4 + rr(-0.3, 0.3), -0.65, 0.65), rr(-3.3, -2.6), 2.4); }
+    else if (G.last === 'player' && Math.hypot(p.x - G.ai.x, p.y - G.ai.y, p.z - G.ai.z) < 0.25) { G.last = 'ai'; G.bounced = false; G.cd = 0.3; launch(b, p, rr(-0.6, 0.6), rr(-1.8, -1.1), 2.2); }
+  }
+  // punto
+  G.idle = Math.hypot(v.x, v.y, v.z) < 0.08 ? G.idle + dt : 0;
+  if (p.y < 0.1 || Math.abs(p.x) > 3.5 || p.z < -7 || p.z > 2 || G.idle > 1) {
+    const w = G.bounced ? G.last : G.last === 'player' ? 'ai' : 'player'; if (w === 'player') G.ps++; else G.as++;
+    b.setEnabled(false); G.serveT = 1.3; G.idle = 0; G.last = null; drawPanel();
+    if (G.ps >= 7 || G.as >= 7) finish(G.ps > G.as);
+  }
+}
+
+// ---- BASKET: palla afferrabile (VR) / tiro con mouse (desktop), canestro con rim in Rapier, sfida 60 s ----
+const HZ = -4.3, HY = 3.05, BR = 0.11;
+function initBasket() {
+  G = { id: 'basket', score: 0, made: 0, shots: 0, time: 60, lastSec: 60, over: false, mouse: new THREE.Vector3(0, 1.2, -1), state: 'ready', held: null, hist: [], t: 0, prevY: 0, scoredThis: false, hintTxt: '', pts: 2, spot: -1, scoreT: undefined };
+  G.lines = () => ['BASKET NEL CASTELLO', `Punti: ${G.score}  (${G.made}/${G.shots})`, `Tempo: ${Math.ceil(G.time)}s`];
+  camera.rotation.x = 0.1;
+  const stoneM = new THREE.MeshStandardMaterial({ color: 0x2b2238, roughness: 0.8 }), orange = new THREE.MeshStandardMaterial({ color: 0xff6a00, emissive: 0xff4400, emissiveIntensity: 0.6 });
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 4.2, 10), stoneM); pole.position.set(0, 2.1, -5.1);
+  const board = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.8, 0.05), new THREE.MeshStandardMaterial({ color: 0x3b2a55, emissive: 0x6a2aff, emissiveIntensity: 0.3 })); board.position.set(0, 3.45, -4.65);
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.02, 8, 24), orange); rim.rotation.x = Math.PI / 2; rim.position.set(0, HY, HZ);
+  const net = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.16, 0.4, 12, 1, true), new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true })); net.position.set(0, HY - 0.2, HZ);
+  const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.9, 12), stoneM); G.ped = ped;
+  stage.add(pole, board, rim, net, ped, arenaRug());
+  const fb = body(RAPIER.RigidBodyDesc.fixed());
+  world.createCollider(RAPIER.ColliderDesc.cuboid(0.6, 0.4, 0.03).setTranslation(0, 3.45, -4.65).setRestitution(0.5), fb);
+  for (let i = 0; i < 12; i++) { const a = (i / 12) * Math.PI * 2; world.createCollider(RAPIER.ColliderDesc.ball(0.025).setTranslation(Math.cos(a) * 0.3, HY, HZ + Math.sin(a) * 0.3).setRestitution(0.5), fb); }
+  G.pb = body(RAPIER.RigidBodyDesc.kinematicPositionBased()); world.createCollider(RAPIER.ColliderDesc.cylinder(0.45, 0.16), G.pb);
+  G.ball = body(RAPIER.RigidBodyDesc.dynamic().setCcdEnabled(true).setTranslation(0, 1.2, -1.2));
+  world.createCollider(RAPIER.ColliderDesc.ball(BR).setRestitution(0.7).setDensity(0.6), G.ball);
+  G.bm = new THREE.Mesh(new THREE.SphereGeometry(BR, 16, 12), new THREE.MeshStandardMaterial({ roughness: 0.7, map: mkTex(128, 64, (g, w, h) => { g.fillStyle = '#ff7a1a'; g.fillRect(0, 0, w, h); g.fillStyle = '#2a1000'; g.fillRect(0, h / 2 - 2, w, 4); for (let i = 0; i < 4; i++) g.fillRect(i * 32 - 2, 0, 4, h); }) }));
+  stage.add(G.bm); bbRespawn(); drawPanel();
+}
+function bbRespawn() {
+  const vr = renderer.xr.isPresenting;
+  const spots = vr ? [{ x: 0.25, z: -0.5, pts: 2 }] : [{ x: 0, z: -1.4, pts: 2 }, { x: -0.5, z: -1.3, pts: 2 }, { x: 0.5, z: -1.3, pts: 2 }, { x: 0, z: -0.4, pts: 3 }, { x: -0.5, z: -0.5, pts: 3 }, { x: 0.5, z: -0.5, pts: 3 }];
+  let k = Math.floor(Math.random() * spots.length); if (spots.length > 1 && k === G.spot) k = (k + 1) % spots.length; G.spot = k;
+  const { x, z, pts } = spots[k]; G.pts = pts;
+  if (!vr) rig.position.z = 1.0;
+  G.pb.setTranslation({ x, y: 0.45, z }, true); G.ped.position.set(x, 0.45, z);
+  G.ball.setBodyType(RAPIER.RigidBodyType.Dynamic, true); G.ball.setTranslation({ x, y: 0.9 + BR + 0.02, z }, true);
+  G.ball.setLinvel({ x: 0, y: 0, z: 0 }, true); G.ball.setAngvel({ x: 0, y: 0, z: 0 }, true); G.state = 'ready'; G.held = null; G.prevY = 0;
+}
+// velocità iniziale per colpire il centro del canestro (angolo di lancio th)
+function bbIdeal(p, aim = 0, th = 0.96) {
+  const dx = -p.x, dz = HZ - p.z, d = Math.hypot(dx, dz), dy = HY - p.y;
+  const v = Math.sqrt((9.81 * d * d) / Math.max(2 * Math.cos(th) ** 2 * (d * Math.tan(th) - dy), 0.1)), a = Math.atan2(dx, -dz) + aim;
+  return new THREE.Vector3(Math.sin(a) * v * Math.cos(th), v * Math.sin(th), -Math.cos(a) * v * Math.cos(th));
+}
+function bbLaunched() { G.state = 'flight'; G.t = 0; G.shots++; G.scoredThis = false; G.scoreT = undefined; drawPanel(); }
+function bbClick(e) { // desktop: mouse = mira (x) e potenza (y: 50% = tiro perfetto), click = tira
+  if (!G || G.id !== 'basket' || mode !== 'game' || paused || G.over || renderer.xr.isPresenting || G.state !== 'ready') return;
+  ray.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera); if (ray.intersectObjects(buttons)[0]) return;
+  const power = cl((G.mouse.y - 0.75) / 0.9, 0, 1), aim = (G.mouse.x / 0.9) * 0.08, p = G.ball.translation(), f = 1 + (0.88 + 0.24 * power - 1) * 0.35;
+  G.ball.setLinvel(bbIdeal(p, aim).multiplyScalar(f), true); G.ball.setAngvel({ x: -3, y: 0, z: 0 }, true); bbLaunched();
+}
+function bbGrab(c) { // VR: grilletto, tasto laterale o pizzico delle dita vicino alla palla = afferra
+  if (!G || G.id !== 'basket' || G.state !== 'ready' || !renderer.xr.isPresenting) return;
+  const bp = G.ball.translation(), cp = handPos(ctrls.indexOf(c), 'point');
+  if (Math.hypot(bp.x - cp.x, bp.y - cp.y, bp.z - cp.z) < 0.38) { G.held = c; G.state = 'held'; G.hist = []; G.ball.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true); buzz(c, 0.5, 40); }
+}
+function bbRelease(c) { // rilascio = lancio con la velocità del movimento della mano
+  if (!G || G.id !== 'basket' || G.held !== c) return;
+  const h = G.hist, a = h[Math.max(0, h.length - 6)], b = h[h.length - 1], vel = new THREE.Vector3();
+  if (b && a !== b) vel.copy(b.p).sub(a.p).divideScalar(Math.max(b.t - a.t, 0.016));
+  G.ball.setBodyType(RAPIER.RigidBodyType.Dynamic, true); G.held = null;
+  if (vel.length() > 1.5) { const ideal = bbIdeal(G.ball.translation(), 0); if (vel.clone().normalize().dot(ideal.clone().normalize()) > 0.6) vel.multiplyScalar(0.65).addScaledVector(ideal, 0.35); G.ball.setLinvel(vel, true); bbLaunched(); buzz(c, 0.6, 50); }
+  else { G.ball.setLinvel(vel, true); G.state = 'flight'; G.t = 0; G.scoredThis = true; }
+}
+ctrls.forEach((c) => { ['selectstart', 'squeezestart'].forEach((ev) => c.addEventListener(ev, () => bbGrab(c))); ['selectend', 'squeezeend'].forEach((ev) => c.addEventListener(ev, () => bbRelease(c))); });
+function bbUpdate(dt) {
+  const b = G.ball; G.time -= dt; if (G.time <= 0) { finishBasket(); return; }
+  if (Math.ceil(G.time) !== G.lastSec) { G.lastSec = Math.ceil(G.time); drawPanel(); }
+  if (G.state === 'held') { const cp = handPos(ctrls.indexOf(G.held), 'point'); G.hist.push({ p: cp.clone(), t: performance.now() / 1000 }); if (G.hist.length > 12) G.hist.shift(); b.setNextKinematicTranslation(cp); }
+  acc += dt; let n = 0; while (acc >= STEP && n++ < 4) { world.step(); acc -= STEP; }
+  const p = b.translation(), q = b.rotation(), v = b.linvel(); G.bm.position.set(p.x, p.y, p.z); G.bm.quaternion.set(q.x, q.y, q.z, q.w);
+  if (G.state === 'flight') { G.t += dt;
+    if (!G.scoredThis && v.y < 0 && G.prevY > HY && p.y <= HY && Math.hypot(p.x, p.z - HZ) < 0.22) { G.scoredThis = true; G.score += G.pts; G.made++; G.scoreT = G.t; drawPanel(); buzz(ctrls[0], 0.6, 80); buzz(ctrls[1], 0.6, 80); say('🏀 Canestro! +' + G.pts + (G.pts === 3 ? ' (da 3!)' : '')); setTimeout(() => say(''), 1000); }
+    if (G.t > 3 || (G.scoredThis && G.scoreT !== undefined && G.t - G.scoreT > 0.9) || (p.y < 0.13 && Math.hypot(v.x, v.y, v.z) < 0.5 && G.t > 0.5) || Math.abs(p.x) > 6 || p.z < -8) bbRespawn(); }
+  G.prevY = p.y;
+  if (!renderer.xr.isPresenting) { const pw = Math.round(cl((G.mouse.y - 0.75) / 0.9, 0, 1) * 10), t = 'Tiro da ' + G.pts + ' punti · Mouse: mira e potenza · Click: tira · Potenza ' + '▮'.repeat(pw) + '▯'.repeat(10 - pw) + ' (5 = ideale)'; if (t !== G.hintTxt) { G.hintTxt = t; $('hint').textContent = t; } }
+  else if (G.hintTxt !== 'vr') { G.hintTxt = 'vr'; $('hint').textContent = 'Afferra la palla (grilletto, tasto laterale o pizzico) · lanciala muovendo il braccio'; }
+}
+function finishBasket() {
+  G.over = true; const s = store.get(), r = s.basket || { best: 0, played: 0 }; r.played++; r.best = Math.max(r.best, G.score); s.basket = r; store.set(s);
+  panel.draw(['TEMPO SCADUTO!', `Punti: ${G.score}`, `Record: ${r.best}`], 40);
+  $('eT').textContent = 'Tempo scaduto!'; $('eP').textContent = `Punti: ${G.score} (${G.made} canestri su ${G.shots} tiri) · record ${r.best}`; $('eTip').textContent = TIPS.basket; $('end').style.display = 'flex';
+}
+
+// ---- CALCIO: 5 rigori contro un portiere zombie. Desktop: mouse = mira, click = tira. VR: raggio del controller sulla porta + grilletto ----
+const GZ = -6.2, GHW = 2.0, GHH = 2.0, CBR = 0.11, SPOT_Z = -1.5, SHOTS = 5;
+function zombieMesh() {
+  const g = new THREE.Group(), skin = new THREE.MeshStandardMaterial({ color: 0x6f9a5c, roughness: 0.9 }), cloth = new THREE.MeshStandardMaterial({ color: 0x3a2a4a, roughness: 0.9 }), red = new THREE.MeshBasicMaterial({ color: 0xff2020 });
+  const bx = (w, h, d, m, x, y, z) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); g.add(o); return o; };
+  bx(0.55, 0.75, 0.28, cloth, 0, 1.15, 0); bx(0.2, 0.75, 0.22, skin, -0.14, 0.38, 0); bx(0.2, 0.75, 0.22, skin, 0.14, 0.38, 0);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.19, 12, 10), skin); head.position.set(0, 1.74, 0.02); g.add(head);
+  [-0.07, 0.07].forEach((x) => { const e = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 6), red); e.position.set(x, 1.77, 0.18); g.add(e); });
+  bx(0.12, 0.12, 0.75, skin, -0.38, 1.45, 0.35); bx(0.12, 0.12, 0.75, skin, 0.38, 1.45, 0.35);
+  return g;
+}
+function pitchTex() { return mkTex(512, 384, (g, w, h) => { g.fillStyle = '#1f5a2a'; g.fillRect(0, 0, w, h); for (let i = 0; i < 12; i++) { g.fillStyle = i % 2 ? 'rgba(0,0,0,.08)' : 'rgba(255,255,255,.04)'; g.fillRect(i * 43, 0, 43, h); }
+  g.strokeStyle = '#e8e8e8'; g.lineWidth = 3; const gy = 55; g.beginPath(); g.moveTo(0, gy); g.lineTo(w, gy); g.stroke(); g.strokeRect(128, gy, 256, 150); g.beginPath(); g.arc(256, 256, 4, 0, 7); g.fillStyle = '#fff'; g.fill(); speck(g, w, h, 2500, 0.18); }); }
+function initCalcio() {
+  G = { id: 'calcio', goals: 0, shots: 0, over: false, state: 'ready', t: 0, rt: 0, clk: 0, mouse: new THREE.Vector3(0, 1.2, -1), tx: 0, ty: 1.1, kx: 0, ky: 0.95, x0: 0, xT: 0, jump: 0, saved: false, hintTxt: '' };
+  G.lines = () => ['RIGORI CONTRO GLI ZOMBIE', `Gol: ${G.goals}`, `Tiro ${Math.min(G.shots + 1, SHOTS)} di ${SHOTS}`];
+  const vr = renderer.xr.isPresenting; rig.position.z = vr ? 0.3 : 1.2; camera.rotation.x = -0.08; G.sp = vr ? { y: 0.85, z: -0.35 } : { y: 0, z: SPOT_Z };
+  ui3d.position.set(3.4, 0, 0.5); ui3d.rotation.y = -0.6;
+  const pitch = new THREE.Mesh(new THREE.PlaneGeometry(12, 9), new THREE.MeshStandardMaterial({ map: pitchTex(), roughness: 1 })); pitch.rotation.x = -Math.PI / 2; pitch.position.set(0, 0.012, -3); stage.add(pitch);
+  const white = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.5, emissive: 0x444444 });
+  const post = (x) => { const m = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, GHH, 10), white); m.position.set(x, GHH / 2, GZ); stage.add(m); };
+  post(-GHW); post(GHW); const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, GHW * 2 + 0.12, 10), white); bar.rotation.z = Math.PI / 2; bar.position.set(0, GHH, GZ); stage.add(bar);
+  const net = new THREE.Mesh(new THREE.BoxGeometry(GHW * 2, GHH, 1.2, 10, 5, 3), new THREE.MeshBasicMaterial({ color: 0xbbbbdd, wireframe: true, transparent: true, opacity: 0.35 })); net.position.set(0, GHH / 2, GZ - 0.6); stage.add(net);
+  const fb = body(RAPIER.RigidBodyDesc.fixed()), col = (hx, hy, hz, x, y, z, r) => world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setRestitution(r), fb);
+  col(0.06, GHH / 2, 0.06, -GHW, GHH / 2, GZ, 0.5); col(0.06, GHH / 2, 0.06, GHW, GHH / 2, GZ, 0.5); col(GHW, 0.06, 0.06, 0, GHH, GZ, 0.5);
+  col(GHW + 0.1, GHH / 2 + 0.1, 0.03, 0, GHH / 2, GZ - 1.2, 0.1); col(0.02, GHH / 2, 0.6, -GHW, GHH / 2, GZ - 0.6, 0.1); col(0.02, GHH / 2, 0.6, GHW, GHH / 2, GZ - 0.6, 0.1); col(GHW, 0.02, 0.6, 0, GHH + 0.05, GZ - 0.6, 0.1);
+  if (vr) { const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.17, 0.85, 12), new THREE.MeshStandardMaterial({ color: 0x2b2238, roughness: 0.8 })); ped.position.set(0, 0.425, G.sp.z); stage.add(ped); col(0.14, 0.425, 0.14, 0, 0.425, G.sp.z, 0.2); }
+  G.kb = body(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 0.95, GZ + 0.3)); world.createCollider(RAPIER.ColliderDesc.cuboid(0.3, 0.9, 0.15).setRestitution(0.4), G.kb);
+  G.zm = zombieMesh(); G.zm.position.set(0, 0, GZ + 0.3); stage.add(G.zm);
+  G.ball = body(RAPIER.RigidBodyDesc.dynamic().setCcdEnabled(true).setTranslation(0, G.sp.y + CBR + 0.02, G.sp.z)); world.createCollider(RAPIER.ColliderDesc.ball(CBR).setRestitution(0.55).setDensity(0.6), G.ball);
+  G.bm = new THREE.Mesh(new THREE.SphereGeometry(CBR, 16, 12), new THREE.MeshStandardMaterial({ roughness: 0.6, map: mkTex(128, 64, (g, w, h) => { g.fillStyle = '#f4f4f4'; g.fillRect(0, 0, w, h); g.fillStyle = '#151515'; for (let i = 0; i < 6; i++) { g.beginPath(); g.arc(10 + i * 22, 14 + (i % 2) * 34, 9, 0, 7); g.fill(); } }) })); stage.add(G.bm);
+  G.cross = new THREE.Mesh(new THREE.RingGeometry(0.13, 0.17, 24), new THREE.MeshBasicMaterial({ color: 0xffa030, transparent: true, opacity: 0.9, depthTest: false })); G.cross.renderOrder = 5; G.cross.visible = !vr; stage.add(G.cross);
+  calcioRespawn(); drawPanel();
+}
+function calcioRespawn() {
+  G.ball.setTranslation({ x: 0, y: G.sp.y + CBR + 0.02, z: G.sp.z }, true); G.ball.setLinvel({ x: 0, y: 0, z: 0 }, true); G.ball.setAngvel({ x: 0, y: 0, z: 0 }, true); G.ball.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
+  G.state = 'ready'; G.t = 0; G.saved = false; G.jump = 0; G.zm.rotation.z = 0;
+}
+function calcioAim() { G.tx = (G.mouse.x / 0.9) * GHW * 1.05; G.ty = 0.12 + ((G.mouse.y - 0.75) / 0.9) * 1.9; }
+function calcioKick(tx, ty, Tov) {
+  if (!G || G.state !== 'ready') return;
+  const p = G.ball.translation(); tx = cl(tx, -2.6, 2.6) + rr(-0.12, 0.12); ty = cl(ty, 0.05, 2.4) + rr(-0.1, 0.1);
+  const T = Tov ?? 0.55 * Math.abs(GZ - p.z) / 4.7;
+  G.ball.setLinvel({ x: (tx - p.x) / T, y: (ty - p.y + 0.5 * 9.81 * T * T) / T, z: (GZ - p.z) / T }, true); G.ball.setAngvel({ x: -8, y: 0, z: 0 }, true);
+  G.state = 'flight'; G.t = 0; G.x0 = G.kx;
+  G.xT = Math.random() < 0.5 ? cl(tx, -1.7, 1.7) : (Math.random() < 0.3 ? 0 : (Math.random() < 0.5 ? -1 : 1) * rr(0.8, 1.6));
+  G.jump = (Math.random() < 0.5 ? ty > 1.3 : Math.random() < 0.3) ? 0.3 : 0;
+}
+function calcioSwing(v, bp, i) { // VR: la direzione e la forza del calcio vengono dal movimento della mano/controller
+  const dir = v.clone().normalize(), t = (GZ - bp.z) / dir.z, sp = v.length();
+  calcioKick(cl(bp.x + dir.x * t * 0.85, -2.8, 2.8), cl(bp.y + dir.y * t * 0.85, 0.1, 2.3), cl(1.1 - sp * 0.14, 0.45, 0.9)); buzz(ctrls[i], 1, 80);
+}
+function calcioClick(e) {
+  if (!G || G.id !== 'calcio' || mode !== 'game' || paused || G.over || renderer.xr.isPresenting || G.state !== 'ready') return;
+  ray.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera); if (ray.intersectObjects(buttons)[0]) return;
+  calcioAim(); calcioKick(G.tx, G.ty);
+}
+ctrls.forEach((c) => c.addEventListener('selectstart', () => {
+  if (!G || G.id !== 'calcio' || G.state !== 'ready' || !renderer.xr.isPresenting || paused || G.over) return;
+  const o = c.getWorldPosition(new THREE.Vector3()), d = new THREE.Vector3(0, 0, -1).transformDirection(c.matrixWorld);
+  ray.set(o, d); if (ray.intersectObjects(buttons)[0] || d.z > -0.05) return;
+  const t = (GZ - o.z) / d.z; calcioKick(o.x + d.x * t, o.y + d.y * t);
+}));
+function calcioResult(kind) {
+  G.state = 'result'; G.rt = 1.6; G.shots++; if (kind === 'goal') G.goals++;
+  say(kind === 'goal' ? '⚽ GOL!' : kind === 'save' ? '🧟 Parata dello zombie!' : 'Fuori!'); drawPanel();
+}
+function calcioUpdate(dt) {
+  G.clk += dt; const ss = (x) => { x = cl(x, 0, 1); return x * x * (3 - 2 * x); };
+  if (G.state === 'ready') { G.kx = 0.5 * Math.sin(G.clk * 2); G.ky = 0.95; }
+  else if (G.state === 'flight') { const s = ss((G.t - 0.3) / 0.45); G.kx = G.x0 + (G.xT - G.x0) * s; G.ky = 0.95 + G.jump * s; G.zm.rotation.z = -(G.xT - G.x0) * 0.3 * s; }
+  if (renderer.xr.isPresenting && G.state === 'ready' && !G.over) { const bp = G.ball.translation(), bv = new THREE.Vector3(bp.x, bp.y, bp.z);
+    for (let i = 0; i < 2; i++) { const s = hv[i]; if (s.ok && handPos(i, 'paddle').distanceTo(bv) < 0.26 && s.v.length() > 1.4 && s.v.z < -0.3) { calcioSwing(s.v, bp, i); break; } } }
+  G.kb.setNextKinematicTranslation({ x: G.kx, y: G.ky, z: GZ + 0.3 }); G.zm.position.set(G.kx, G.ky - 0.95, GZ + 0.3);
+  acc += dt; let n = 0; while (acc >= STEP && n++ < 4) { world.step(); acc -= STEP; }
+  const b = G.ball, p = b.translation(), q = b.rotation(); G.bm.position.set(p.x, p.y, p.z); G.bm.quaternion.set(q.x, q.y, q.z, q.w);
+  if (G.state === 'flight') { G.t += dt;
+    if (!G.saved && Math.abs(p.x - G.kx) < 0.45 && Math.abs(p.y - G.ky) < 1.0 && Math.abs(p.z - (GZ + 0.3)) < 0.3) { G.saved = true; calcioResult('save'); }
+    else if (p.z < GZ - 0.05) calcioResult(Math.abs(p.x) < GHW - CBR && p.y < GHH - CBR ? 'goal' : 'miss');
+    else if (G.t > 3) calcioResult('miss'); }
+  else if (G.state === 'result') { G.rt -= dt; if (G.rt <= 0) { say(''); if (G.shots >= SHOTS) finishCalcio(); else calcioRespawn(); } }
+  if (!renderer.xr.isPresenting) { calcioAim(); G.cross.position.set(cl(G.tx, -2.6, 2.6), cl(G.ty, 0.05, 2.4), GZ + 0.1); G.cross.visible = G.state === 'ready'; const t = 'Mouse: punta nella porta · Click: tira'; if (G.hintTxt !== t) { G.hintTxt = t; $('hint').textContent = t; } }
+  else if (G.hintTxt !== 'vr') { G.hintTxt = 'vr'; $('hint').textContent = 'Calcia la palla con un movimento del braccio (o punta il raggio e premi il grilletto)'; }
+}
+function finishCalcio() {
+  G.over = true; const s = store.get(), r = s.calcio || { best: 0, played: 0 }; r.played++; r.best = Math.max(r.best, G.goals); s.calcio = r; store.set(s);
+  panel.draw([G.goals >= 3 ? 'VITTORIA! 🎉' : 'FINITA 💀', `Gol: ${G.goals} su ${SHOTS}`, `Record: ${r.best}`], 40);
+  $('eT').textContent = G.goals >= 3 ? 'Gli zombie sono battuti!' : 'Lo zombie para tutto!'; $('eP').textContent = `Gol: ${G.goals} su ${SHOTS} rigori · record ${r.best}`; $('eTip').textContent = TIPS.calcio; $('end').style.display = 'flex';
+}
+
+// ---- ARRAMPICATA DELLA STREGA: torre con appigli, 90 s. Desktop: click sugli appigli a portata. VR: afferra con il grilletto e tirati su ----
+const WZ = -2.6, REACH = 1.45, CLIMB_T = 90, CRUMB_T = 2.5, lastPtr = { x: 0, y: 0 };
+addEventListener('pointermove', (e) => { lastPtr.x = e.clientX; lastPtr.y = e.clientY; });
+function initClimb() {
+  const vr = renderer.xr.isPresenting;
+  G = { id: 'climb', time: CLIMB_T, lastSec: CLIMB_T, best: 0, shownBest: -1, over: false, cur: null, gx: 0, fall: false, vy: 0, holds: [], meshes: [], clk: 0, last: null, hintT: 0, hover: null };
+  G.lines = () => ['ARRAMPICATA DELLA STREGA', `Altezza: ${G.best.toFixed(1)} m`, `Tempo: ${Math.ceil(G.time)}s`];
+  ctrls.forEach((c) => (c.userData.hold = null));
+  rig.position.set(0, 0, vr ? WZ + 0.6 : 0); rig.rotation.y = 0; camera.rotation.x = 0.12;
+  ui3d.position.set(-3.4, 0, 1.9); ui3d.rotation.y = 0.7;
+  const wall = new THREE.Mesh(new THREE.BoxGeometry(4.4, 13, 0.4), new THREE.MeshStandardMaterial({ map: brickTex, color: 0xb8a8c8, roughness: 0.9 })); wall.position.set(0, 6.5, WZ - 0.2); stage.add(wall);
+  const stoneM = new THREE.MeshStandardMaterial({ color: 0x2b2238, roughness: 0.8 });
+  [-2.5, 2.5].forEach((x) => { const pl = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.28, 13, 10), stoneM); pl.position.set(x, 6.5, WZ - 0.1); stage.add(pl);
+    [2, 5, 8, 11].forEach((y) => { const l = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 10), pumpMat); l.scale.y = 0.85; l.position.set(x, y, WZ + 0.2); l.rotation.y = Math.PI; stage.add(l); }); });
+  // appigli: percorso garantito (distanza <= 1.3 m tra successivi) + appigli extra; viola = si spezza dopo 2,5 s
+  const hs = []; [-0.8, 0, 0.8].forEach((x) => hs.push({ x, y: rr(1.35, 1.6), crumb: false }));
+  let y = 1.5, px = 0;
+  while (y < 11) { y += rr(0.6, 0.9); px = cl(px + rr(-0.9, 0.9), -1.5, 1.5); hs.push({ x: px, y, crumb: Math.random() < 0.25 });
+    const k = 1 + Math.floor(Math.random() * 2); for (let i = 0; i < k; i++) hs.push({ x: cl(px + rr(-1.2, 1.2), -1.5, 1.5), y: y + rr(-0.3, 0.3), crumb: Math.random() < 0.5 }); }
+  hs.push({ x: px, y: y + 0.8, top: true });
+  const mats = { n: [0xff8a1f, 0x5a2200], c: [0xa44cff, 0x38006a], t: [0xffd54a, 0xaa7700] };
+  hs.forEach((h) => { const m = mats[h.top ? 't' : h.crumb ? 'c' : 'n']; h.p = new THREE.Vector3(h.x, h.y, WZ + 0.1); h.broken = false; h.t0 = 0; h.base = 0.5;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(h.top ? 0.22 : 0.14, 12, 8), new THREE.MeshStandardMaterial({ color: m[0], emissive: m[1], emissiveIntensity: 0.5, roughness: 0.6 }));
+    mesh.scale.set(1, 0.85, 0.8); mesh.position.copy(h.p); mesh.userData.h = h; h.mesh = mesh; stage.add(mesh); G.meshes.push(mesh);
+    if (h.top) { const gl = glow(0xffd54a, 2.2, 0.8); gl.position.copy(h.p); stage.add(gl); } });
+  G.holds = hs; drawPanel();
+}
+function breakHold(h) {
+  if (h.broken) return; h.broken = true; h.mesh.visible = false; say('💥 L\'appiglio si è rotto!'); setTimeout(() => say(''), 1200);
+  ctrls.forEach((c) => { if (c.userData.hold === h) c.userData.hold = null; });
+  if (G.cur === h) { G.cur = null; G.fall = true; G.vy = 0; G.gx = rig.position.x; }
+}
+function climbClick(e) {
+  if (!G || G.id !== 'climb' || mode !== 'game' || paused || G.over || renderer.xr.isPresenting || G.fall) return;
+  ray.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera); if (ray.intersectObjects(buttons)[0]) return;
+  const hit = ray.intersectObjects(G.meshes.filter((m) => !m.userData.h.broken))[0]; if (!hit) return;
+  const h = hit.object.userData.h, g = G.cur ? G.cur.p : new THREE.Vector3(G.gx, 1.7, WZ + 0.1);
+  if (Math.hypot(h.p.x - g.x, h.p.y - g.y) > REACH) { say('Troppo lontano!'); setTimeout(() => say(''), 700); return; }
+  G.cur = h; h.t0 = G.clk; if (h.top) finishClimb(true);
+}
+function climbGrab(c) { // VR: grilletto, tasto laterale o pizzico delle dita su un appiglio
+  if (!G || G.id !== 'climb' || G.over || paused || !renderer.xr.isPresenting) return;
+  const cp = handPos(ctrls.indexOf(c), 'point'); let bh = null, bd = 0.28;
+  G.holds.forEach((h) => { if (h.broken) return; const d = h.p.distanceTo(cp); if (d < bd) { bd = d; bh = h; } });
+  if (bh) { c.userData.hold = bh; if (!bh.t0 || G.clk - bh.t0 > CRUMB_T + 1) bh.t0 = G.clk; G.last = c; G.vy = 0; buzz(c, 0.6, 50); if (bh.top) finishClimb(true); }
+}
+ctrls.forEach((c) => { ['selectstart', 'squeezestart'].forEach((ev) => c.addEventListener(ev, () => climbGrab(c))); ['selectend', 'squeezeend'].forEach((ev) => c.addEventListener(ev, () => { c.userData.hold = null; })); });
+function climbUpdate(dt) {
+  G.clk += dt; G.time -= dt; if (G.time <= 0) { finishClimb(false); return; }
+  const vr = renderer.xr.isPresenting, tmp = new THREE.Vector3();
+  if (vr) {
+    const hold = ctrls.filter((c) => c.userData.hold), c = G.last && G.last.userData.hold ? G.last : hold[0];
+    if (c) { const h = c.userData.hold, cp = handPos(ctrls.indexOf(c), 'point', tmp); rig.position.x += h.p.x - cp.x; rig.position.y += h.p.y - cp.y; G.vy = 0; }
+    else if (rig.position.y > 0) { G.vy -= 9.81 * dt; rig.position.y = Math.max(0, rig.position.y + G.vy * dt); if (rig.position.y === 0) G.vy = 0; }
+    if (rig.position.y < 0) rig.position.y = 0;
+    hold.forEach((k) => { const h = k.userData.hold; if (h && h.crumb && G.clk - h.t0 > CRUMB_T) breakHold(h); });
+  } else {
+    if (G.fall) { G.vy -= 9.81 * dt; rig.position.y = Math.max(0, rig.position.y + G.vy * dt); if (rig.position.y === 0) { G.fall = false; G.vy = 0; } }
+    else { const tx = G.cur ? G.cur.p.x : G.gx, ty = G.cur ? G.cur.p.y - 1.7 : 0, k = Math.min(1, 6 * dt); rig.position.x += (tx - rig.position.x) * k; rig.position.y += (ty - rig.position.y) * k; if (G.cur) G.gx = G.cur.p.x; }
+    const h = G.cur; if (h && h.crumb) { const el = G.clk - h.t0; if (el > CRUMB_T) breakHold(h); else if (el > 1.4) h.mesh.position.x = h.p.x + 0.02 * Math.sin(G.clk * 60); }
+    // evidenzia l'appiglio sotto il mouse se a portata
+    const g = G.cur ? G.cur.p : new THREE.Vector3(G.gx, 1.7, WZ + 0.1);
+    ray.setFromCamera(new THREE.Vector2((lastPtr.x / innerWidth) * 2 - 1, -(lastPtr.y / innerHeight) * 2 + 1), camera);
+    const hit = ray.intersectObjects(G.meshes.filter((m) => !m.userData.h.broken))[0], hv = hit && !G.fall && Math.hypot(hit.object.userData.h.p.x - g.x, hit.object.userData.h.p.y - g.y) <= REACH ? hit.object.userData.h : null;
+    if (hv !== G.hover) { if (G.hover) G.hover.mesh.material.emissiveIntensity = 0.5; if (hv) hv.mesh.material.emissiveIntensity = 1.8; G.hover = hv; }
+  }
+  const hy = camera.getWorldPosition(tmp).y - 1.6; if (hy > G.best) G.best = hy;
+  ui3d.position.y = rig.position.y;
+  if (Math.ceil(G.time) !== G.lastSec || Math.abs(G.best - G.shownBest) >= 0.1) { G.lastSec = Math.ceil(G.time); G.shownBest = G.best; drawPanel(); }
+  G.hintT -= dt; if (G.hintT <= 0) { G.hintT = 0.3; $('hint').textContent = `Altezza ${G.best.toFixed(1)} m · ${Math.ceil(G.time)}s · ` + (vr ? 'Afferra gli appigli (grilletto, tasto laterale o pizzico) e tirati su con le braccia · viola = si rompe' : 'Click sugli appigli vicini · viola = si rompe dopo 2,5 s · arriva all\'appiglio dorato'); }
+}
+function finishClimb(win) {
+  if (G.over) return; G.over = true; if (win) G.best = Math.max(G.best, 10);
+  const s = store.get(), r = s.climb || { best: 0, played: 0, wins: 0 }; r.played++; if (win) r.wins++; r.best = Math.max(r.best, +G.best.toFixed(1)); s.climb = r; store.set(s);
+  ctrls.forEach((c) => (c.userData.hold = null));
+  panel.draw([win ? 'SEI IN CIMA! 🧙' : 'TEMPO SCADUTO!', `Altezza: ${G.best.toFixed(1)} m`, `Record: ${r.best} m`], 40);
+  $('eT').textContent = win ? 'Hai raggiunto la cima!' : 'Tempo scaduto!'; $('eP').textContent = `Altezza: ${G.best.toFixed(1)} m · record ${r.best} m`; $('eTip').textContent = TIPS.climb; $('end').style.display = 'flex';
+}
+
+// ---- Input desktop ----
+let yaw = 0, pitch = 0, drag = false, moved = false; const keys = {};
+const cv = renderer.domElement;
+cv.addEventListener('pointerdown', (e) => { drag = true; moved = false; bbClick(e); calcioClick(e); climbClick(e); });
+addEventListener('pointerup', (e) => { drag = false; if (!moved && e.target === cv) { const v = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(v, camera); pick(ray.ray.origin, ray.ray.direction); } });
+addEventListener('pointermove', (e) => {
+  if (mode === 'game' && G && !renderer.xr.isPresenting) G.mouse.set(((e.clientX / innerWidth) * 2 - 1) * 0.9, 0.75 + (1 - e.clientY / innerHeight) * 0.9, -1.0);
+  if (drag && mode === 'menu') { moved = true; yaw -= e.movementX * 0.004; pitch = cl(pitch - e.movementY * 0.004, -1.2, 1.2); } });
+addEventListener('keydown', (e) => { keys[e.code] = true; if (e.code === 'KeyP') togglePause(); }); addEventListener('keyup', (e) => (keys[e.code] = false));
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+$('bMenu').onclick = toMenu; $('bPause').onclick = togglePause; $('eMenu').onclick = toMenu; $('eAgain').onclick = () => start(G.id);
+$('bScores').onclick = () => { const s = store.get(), r = s.pingpong; const bb = s.basket, cc = s.calcio, cb = s.climb; say([cb && `Arrampicata: record ${cb.best} m`, cc && `Rigori: record ${cc.best} gol su 5`, r && `Ping pong: ${r.wins} vittorie su ${r.played} partite · miglior scarto +${r.best}`, bb && `Basket: record ${bb.best} punti`].filter(Boolean).join(' | ') || 'Nessun punteggio ancora: gioca una partita!'); };
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (renderer.xr.isPresenting) trackHands(dt);
+  if (!renderer.xr.isPresenting && mode === 'menu') { rig.rotation.y = yaw; camera.rotation.x = pitch;
+    rig.translateZ(-((keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0)) * 3 * dt); rig.translateX(((keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0)) * 3 * dt); }
+  if (mode === 'game' && G && !paused && !G.over) (G.id === 'basket' ? bbUpdate(dt) : G.id === 'calcio' ? calcioUpdate(dt) : G.id === 'climb' ? climbUpdate(dt) : ppUpdate(dt));
+  env.update(clock.elapsedTime); fx.update(clock.elapsedTime); renderer.render(scene, camera);
+});
+toMenu();
+</script></body></html>
