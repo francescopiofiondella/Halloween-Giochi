@@ -318,14 +318,38 @@ const ctrls = [0, 1].map((i) => { const c = renderer.xr.getController(i); rig.ad
 
 // Mani e controller: modelli visibili, posizione "di presa", velocità del movimento e vibrazione
 const hands = [0, 1].map((i) => { const h = renderer.xr.getHand(i); rig.add(h); try { h.add(new XRHandModelFactory().createHandModel(h, 'spheres')); } catch {} return h; });
-[0, 1].forEach((i) => { const g = renderer.xr.getControllerGrip(i); rig.add(g); try { g.add(new XRControllerModelFactory().createControllerModel(g)); } catch {} });
+const grips = [0, 1].map((i) => { const g = renderer.xr.getControllerGrip(i); rig.add(g); return g; });
+// Mani stilizzate al posto dei controller; nei rigori diventano scarpini da calcio
+const visM = (c, e = 0) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.6, emissive: c, emissiveIntensity: e });
+function mkHandVis(left) {
+  const g = new THREE.Group(), skin = visM(0xe9d2b8, 0.12), cuff = visM(0xff8a1f, 0.6), bx = (w, h, d, m, x, y, z, ry = 0) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); o.rotation.y = ry; g.add(o); return o; };
+  bx(0.085, 0.028, 0.095, skin, 0, 0, -0.03); [0, 1, 2, 3].forEach((k) => bx(0.017, 0.018, 0.07 - (k === 0 || k === 3 ? 0.012 : 0), skin, -0.03 + k * 0.02, 0, -0.115)); bx(0.02, 0.02, 0.06, skin, 0.058, 0, -0.045, -0.7);
+  const cf = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.054, 0.045, 14), cuff); cf.rotation.x = Math.PI / 2; cf.position.set(0, 0, 0.04); g.add(cf);
+  const gl = glow(0xff9a2e, 0.3, 0.5); gl.position.set(0, 0, 0.04); g.add(gl); if (left) g.scale.x = -1; return g;
+}
+function mkFootVis() {
+  const g = new THREE.Group(), bx = (w, h, d, m, x, y, z) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); g.add(o); return o; };
+  bx(0.105, 0.03, 0.3, visM(0xff8a1f, 0.5), 0, -0.045, -0.06); bx(0.1, 0.07, 0.22, visM(0x2a1146, 0.1), 0, -0.005, -0.03);
+  const toe = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 8), visM(0x2a1146, 0.1)); toe.scale.set(1, 0.7, 1.2); toe.position.set(0, -0.015, -0.15); g.add(toe);
+  const an = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.056, 0.13, 10), visM(0x3a1a60, 0.1)); an.position.set(0, 0.06, 0.05); g.add(an);
+  [-0.02, 0.02].forEach((x) => bx(0.012, 0.012, 0.09, visM(0xffffff, 0.8), x, 0.035, -0.07)); // lacci
+  const gl = glow(0xff9a2e, 0.4, 0.4); gl.position.set(0, -0.03, -0.1); g.add(gl); return g;
+}
+const vis = [0, 1].map((i) => { const hnd = mkHandVis(i === 0), foot = mkFootVis(), g = new THREE.Group(); g.add(hnd, foot); hnd.visible = foot.visible = false; g.visible = false; scene.add(g); return { g, hnd, foot, sc: new THREE.Vector3() }; });
+function updateVis() {
+  const xr = renderer.xr.isPresenting, calcio = typeof G !== 'undefined' && mode === 'game' && G && G.id === 'calcio';
+  vis.forEach((v, i) => { const c = ctrls[i], isH = !!c.userData.isHand, o = isH ? (hands[i].joints && hands[i].joints.wrist) : grips[i], ok = xr && c.userData.hand !== undefined && !!o;
+    if (ok) { o.updateWorldMatrix(true, false); o.matrixWorld.decompose(v.g.position, v.g.quaternion, v.sc); if (c.userData.hand) v.hnd.scale.x = c.userData.hand === 'left' ? -1 : 1; }
+    v.g.visible = ok; v.hnd.visible = ok && !calcio && !isH; v.foot.visible = ok && calcio; hands[i].visible = isH && !calcio; });
+}
 function handPos(i, kind = 'point', out = new THREE.Vector3()) { // con il tracciamento delle mani usa le dita/polso, con i controller la loro posizione
   const c = ctrls[i], j = hands[i] && hands[i].joints;
   if (c.userData.isHand && j) { const jt = j[kind === 'paddle' ? 'wrist' : 'index-finger-tip']; if (jt) return jt.getWorldPosition(out); }
   return c.getWorldPosition(out);
 }
-const hv = [0, 1].map(() => ({ p: new THREE.Vector3(), v: new THREE.Vector3(), ok: false }));
-function trackHands(dt) { hv.forEach((s, i) => { const p = handPos(i, 'paddle'); if (s.ok && dt > 0) s.v.lerp(p.clone().sub(s.p).divideScalar(Math.max(dt, 1e-3)), 0.5); s.p.copy(p); s.ok = true; }); }
+const hv = [0, 1].map(() => ({ p: new THREE.Vector3(), prev: new THREE.Vector3(), v: new THREE.Vector3(), ok: false }));
+function segDist(pt, a, b) { const ab = b.clone().sub(a), l2 = ab.lengthSq(); const t = l2 > 1e-8 ? Math.min(1, Math.max(0, pt.clone().sub(a).dot(ab) / l2)) : 0; return a.clone().addScaledVector(ab, t).distanceTo(pt); }
+function trackHands(dt) { hv.forEach((s, i) => { const p = handPos(i, 'paddle'); if (s.ok && dt > 0) { s.prev.copy(s.p); s.v.lerp(p.clone().sub(s.p).divideScalar(Math.max(dt, 1e-3)), 0.5); } else s.prev.copy(p); s.p.copy(p); s.ok = true; }); }
 function buzz(c, st = 0.5, ms = 40) { try { const gp = c && c.userData.gp, a = gp && gp.hapticActuators && gp.hapticActuators[0]; if (a && a.pulse) a.pulse(st, ms); else if (gp && gp.vibrationActuator) gp.vibrationActuator.playEffect('dual-rumble', { duration: ms, strongMagnitude: st, weakMagnitude: st }); } catch {} }
 const ray = new THREE.Raycaster();
 function pick(o, d) {
@@ -394,7 +418,7 @@ function initPingPong() {
   drawPanel();
 }
 const rr = (a, b) => a + Math.random() * (b - a), cl = (v, a, b) => Math.min(b, Math.max(a, v));
-function launch(b, from, tx, tz, sy) { if (from.z !== undefined) burst(from.x, from.y, from.z, 0xffb060, 10, 1.8); const t = (sy + Math.sqrt(sy * sy + 19.6 * Math.max(0, from.y - 0.81))) / 9.8; b.setLinvel({ x: (tx - from.x) / t, y: sy, z: (tz - from.z) / t }, true); }
+function launch(b, from, tx, tz, sy) { const fz = from.z !== undefined ? from.z : b.translation().z; burst(from.x, from.y, fz, 0xffb060, 10, 1.8); const t = (sy + Math.sqrt(sy * sy + 19.6 * Math.max(0, from.y - 0.81))) / 9.8; b.setLinvel({ x: (tx - from.x) / t, y: sy, z: (tz - fz) / t }, true); }
 function ppUpdate(dt) {
   const b = G.ball; G.cd -= dt;
   // racchetta giocatore
@@ -412,7 +436,7 @@ function ppUpdate(dt) {
   G.ap.b.setNextKinematicTranslation(G.ai); G.ap.g.position.copy(G.ai);
   if (G.vamp) { G.vamp.position.x = G.ai.x * 0.55; const sh = new THREE.Vector3(G.vamp.position.x + 0.28, 1.4, -4.55), d = G.ai.clone().sub(sh), L = d.length(); G.arm.position.copy(sh).addScaledVector(d, 0.5); G.arm.scale.set(1, L, 1); G.arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize()); }
   // serve
-  if (G.serveT > 0) { G.serveT -= dt; if (G.serveT <= 0) { b.setEnabled(true); b.setTranslation({ x: rr(-0.3, 0.3), y: 1.0, z: -3.5 }, true); b.setAngvel({ x: 0, y: 0, z: 0 }, true); launch(b, { x: 0, y: 1.0 }, rr(-0.5, 0.5), rr(-1.8, -1.1), 2.2); G.last = 'ai'; G.bounced = false; } G.bm.visible = b.isEnabled(); return; }
+  if (G.serveT > 0) { G.serveT -= dt; if (G.serveT <= 0) { const sx = rr(-0.3, 0.3); b.setEnabled(true); b.setTranslation({ x: sx, y: 1.0, z: -3.5 }, true); b.setLinvel({ x: 0, y: 0, z: 0 }, true); b.setAngvel({ x: 0, y: 0, z: 0 }, true); launch(b, { x: sx, y: 1.0, z: -3.5 }, rr(-0.5, 0.5), rr(-1.8, -1.1), 2.2); G.last = 'ai'; G.bounced = false; G.pvy = 0; G.cd = 0.2; G.idle = 0; } G.bm.visible = b.isEnabled(); return; }
   acc += dt; let n = 0; while (acc >= STEP && n++ < 4) { world.step(); acc -= STEP; }
   const p = b.translation(), v = b.linvel(); G.bm.position.set(p.x, p.y, p.z); G.bm.visible = true;
   // rimbalzo sul tavolo
@@ -450,16 +474,22 @@ function initBasket() {
   const halo = glow(0x8a5bff, 4.5, 0.35); halo.position.set(0, 3.4, -4.6); stage.add(halo); const rg = glow(0xff7a18, 1.0, 0.5); rg.position.set(0, HY, HZ); stage.add(rg);
   const fb = body(RAPIER.RigidBodyDesc.fixed());
   world.createCollider(RAPIER.ColliderDesc.cuboid(0.6, 0.4, 0.03).setTranslation(0, 3.45, -4.65).setRestitution(0.5), fb);
-  for (let i = 0; i < 12; i++) { const a = (i / 12) * Math.PI * 2; world.createCollider(RAPIER.ColliderDesc.ball(0.025).setTranslation(Math.cos(a) * 0.3, HY, HZ + Math.sin(a) * 0.3).setRestitution(0.5), fb); }
+  G.net = net; G.netK = 0;
+  { const N = 24, hl = 0.3 * Math.sin(Math.PI / N) + 0.012; // anello continuo: segmenti tangenti, la palla non si incastra più tra i pioli
+    for (let i = 0; i < N; i++) { const a = (i / N) * Math.PI * 2, th = -(a + Math.PI / 2);
+      world.createCollider(RAPIER.ColliderDesc.cuboid(hl, 0.022, 0.022).setTranslation(Math.cos(a) * 0.3, HY, HZ + Math.sin(a) * 0.3).setRotation({ x: 0, y: Math.sin(th / 2), z: 0, w: Math.cos(th / 2) }).setRestitution(0.45).setFriction(0.4), fb); } }
   G.pb = body(RAPIER.RigidBodyDesc.kinematicPositionBased()); world.createCollider(RAPIER.ColliderDesc.cylinder(0.45, 0.16), G.pb);
-  G.ball = body(RAPIER.RigidBodyDesc.dynamic().setCcdEnabled(true).setTranslation(0, 1.2, -1.2));
-  world.createCollider(RAPIER.ColliderDesc.ball(BR).setRestitution(0.7).setDensity(0.6), G.ball);
+  G.ball = body(RAPIER.RigidBodyDesc.dynamic().setCcdEnabled(true).setLinearDamping(0.04).setAngularDamping(0.4).setTranslation(0, 1.2, -1.2));
+  world.createCollider(RAPIER.ColliderDesc.ball(BR).setRestitution(0.62).setFriction(0.6).setDensity(0.6), G.ball);
   G.bm = new THREE.Mesh(new THREE.SphereGeometry(BR, 16, 12), new THREE.MeshStandardMaterial({ roughness: 0.7, map: mkTex(128, 64, (g, w, h) => { g.fillStyle = '#ff7a1a'; g.fillRect(0, 0, w, h); g.fillStyle = '#2a1000'; g.fillRect(0, h / 2 - 2, w, 4); for (let i = 0; i < 4; i++) g.fillRect(i * 32 - 2, 0, 4, h); }) }));
-  G.bm.add(glow(0xff8a30, 0.55, 0.3)); stage.add(G.bm); bbRespawn(); drawPanel();
+  G.bg = glow(0xff8a30, 0.55, 0.3); G.bm.add(G.bg); stage.add(G.bm); bbRespawn(); drawPanel();
 }
 function bbRespawn() {
   const vr = renderer.xr.isPresenting;
-  const spots = vr ? [{ x: 0.25, z: -0.5, pts: 2 }] : [{ x: 0, z: -1.4, pts: 2 }, { x: -0.5, z: -1.3, pts: 2 }, { x: 0.5, z: -1.3, pts: 2 }, { x: 0, z: -0.4, pts: 3 }, { x: -0.5, z: -0.5, pts: 3 }, { x: 0.5, z: -0.5, pts: 3 }];
+  let vrSpot = { x: 0.25, z: -0.5, pts: 2 };
+  if (vr) { const cp = camera.getWorldPosition(new THREE.Vector3()), fw = camera.getWorldDirection(new THREE.Vector3()); fw.y = 0; if (fw.lengthSq() < 1e-3) fw.set(0, 0, -1); fw.normalize();
+    const sx = cl(cp.x + fw.x * 0.55, -3.5, 3.5), sz = cl(cp.z + fw.z * 0.55, -2.8, 3); vrSpot = { x: sx, z: sz, pts: Math.hypot(sx, sz - HZ) > 4.9 ? 3 : 2 }; }
+  const spots = vr ? [vrSpot] : [{ x: 0, z: -1.4, pts: 2 }, { x: -0.5, z: -1.3, pts: 2 }, { x: 0.5, z: -1.3, pts: 2 }, { x: 0, z: -0.4, pts: 3 }, { x: -0.5, z: -0.5, pts: 3 }, { x: 0.5, z: -0.5, pts: 3 }];
   let k = Math.floor(Math.random() * spots.length); if (spots.length > 1 && k === G.spot) k = (k + 1) % spots.length; G.spot = k;
   const { x, z, pts } = spots[k]; G.pts = pts;
   if (!vr) rig.position.z = 1.0;
@@ -483,27 +513,35 @@ function bbClick(e) { // desktop: mouse = mira (x) e potenza (y: 50% = tiro perf
 function bbGrab(c) { // VR: grilletto, tasto laterale o pizzico delle dita vicino alla palla = afferra
   if (!G || G.id !== 'basket' || G.state !== 'ready' || !renderer.xr.isPresenting) return;
   const bp = G.ball.translation(), cp = handPos(ctrls.indexOf(c), 'point');
-  if (Math.hypot(bp.x - cp.x, bp.y - cp.y, bp.z - cp.z) < 0.38) { G.held = c; G.state = 'held'; G.hist = []; G.ball.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true); buzz(c, 0.5, 40); }
+  if (Math.hypot(bp.x - cp.x, bp.y - cp.y, bp.z - cp.z) < 0.5) { G.held = c; G.state = 'held'; G.hist = []; G.ball.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true); buzz(c, 0.5, 40); }
 }
-function bbRelease(c) { // rilascio = lancio con la velocità del movimento della mano
+function bbRelease(c) { // rilascio = lancio con la velocità media della mano negli ultimi ~90 ms + assistenza alla mira
   if (!G || G.id !== 'basket' || G.held !== c) return;
-  const h = G.hist, a = h[Math.max(0, h.length - 6)], b = h[h.length - 1], vel = new THREE.Vector3();
-  if (b && a !== b) vel.copy(b.p).sub(a.p).divideScalar(Math.max(b.t - a.t, 0.016));
+  const h = G.hist, now = performance.now() / 1000, vel = new THREE.Vector3(); let rec = h.filter((s) => now - s.t < 0.1); if (rec.length < 2) rec = h.slice(-3);
+  if (rec.length >= 2) { const a = rec[0], b = rec[rec.length - 1]; vel.copy(b.p).sub(a.p).divideScalar(Math.max(b.t - a.t, 0.016)); }
   G.ball.setBodyType(RAPIER.RigidBodyType.Dynamic, true); G.held = null;
-  if (vel.length() > 1.5) { const ideal = bbIdeal(G.ball.translation(), 0); if (vel.clone().normalize().dot(ideal.clone().normalize()) > 0.6) vel.multiplyScalar(0.65).addScaledVector(ideal, 0.35); G.ball.setLinvel(vel, true); bbLaunched(); buzz(c, 0.6, 50); }
-  else { G.ball.setLinvel(vel, true); G.state = 'flight'; G.t = 0; G.scoredThis = true; }
+  const sp = vel.length();
+  if (sp > 1.4) {
+    const ideal = bbIdeal(G.ball.translation(), 0, 0.9), idealSp = ideal.length(), dot = vel.clone().normalize().dot(ideal.clone().normalize());
+    if (dot > 0.45) { const k = cl((dot - 0.45) / 0.4, 0, 1) * 0.65, power = cl(sp / idealSp, 0.7, 1.3); vel.lerp(ideal.multiplyScalar(power), k); }
+    G.ball.setLinvel(vel, true); G.ball.setAngvel({ x: -3 * Math.sign(vel.z || -1) * -1, y: 0, z: 0 }, true); bbLaunched(); buzz(c, 0.6, 50);
+  } else { G.ball.setLinvel(vel, true); G.state = 'flight'; G.t = 0; G.scoredThis = true; }
 }
 ctrls.forEach((c) => { ['selectstart', 'squeezestart'].forEach((ev) => c.addEventListener(ev, () => bbGrab(c))); ['selectend', 'squeezeend'].forEach((ev) => c.addEventListener(ev, () => bbRelease(c))); });
 function bbUpdate(dt) {
   const b = G.ball; G.time -= dt; if (G.time <= 0) { finishBasket(); return; }
   if (Math.ceil(G.time) !== G.lastSec) { G.lastSec = Math.ceil(G.time); drawPanel(); }
-  if (G.state === 'held') { const cp = handPos(ctrls.indexOf(G.held), 'point'); G.hist.push({ p: cp.clone(), t: performance.now() / 1000 }); if (G.hist.length > 12) G.hist.shift(); b.setNextKinematicTranslation(cp); }
+  if (G.state === 'held') { const hc = G.held, cp = handPos(ctrls.indexOf(hc), 'point'); if (!hc.userData.isHand) cp.addScaledVector(new THREE.Vector3(0, 0, -1).transformDirection(hc.matrixWorld), 0.09); G.hist.push({ p: cp.clone(), t: performance.now() / 1000 }); if (G.hist.length > 16) G.hist.shift(); b.setNextKinematicTranslation(cp); }
+  { const bp = b.translation(), dr = Math.hypot(bp.x, bp.z - HZ); // la rete frena e centra la palla che la attraversa
+    if (G.state === 'flight' && bp.y < HY - 0.02 && bp.y > HY - 0.5 && dr < 0.27) { const lv = b.linvel(), k = Math.max(0, 1 - 7 * dt); b.setLinvel({ x: lv.x * k - bp.x * 2 * dt, y: lv.y * Math.max(0, 1 - 2.2 * dt), z: lv.z * k - (bp.z - HZ) * 2 * dt }, true); G.netK = 1; }
+    G.netK = Math.max(0, (G.netK || 0) - 2.5 * dt); if (G.net) G.net.scale.set(1 + 0.15 * G.netK, 1 + 0.35 * G.netK, 1 + 0.15 * G.netK); }
   acc += dt; let n = 0; while (acc >= STEP && n++ < 4) { world.step(); acc -= STEP; }
   const p = b.translation(), q = b.rotation(), v = b.linvel(); G.bm.position.set(p.x, p.y, p.z); G.bm.quaternion.set(q.x, q.y, q.z, q.w);
   if (G.state === 'flight') { G.t += dt;
-    if (!G.scoredThis && v.y < 0 && G.prevY > HY && p.y <= HY && Math.hypot(p.x, p.z - HZ) < 0.22) { G.scoredThis = true; G.score += G.pts; G.made++; G.scoreT = G.t; burst(0, HY - 0.2, HZ, 0xffa030, 40, 3.5); drawPanel(); buzz(ctrls[0], 0.6, 80); buzz(ctrls[1], 0.6, 80); say('🏀 Canestro! +' + G.pts + (G.pts === 3 ? ' (da 3!)' : '')); setTimeout(() => say(''), 1000); }
+    if (!G.scoredThis && v.y < 0 && G.prevY > HY && p.y <= HY && Math.hypot(p.x, p.z - HZ) < 0.25) { G.scoredThis = true; G.score += G.pts; G.made++; G.scoreT = G.t; burst(0, HY - 0.2, HZ, 0xffa030, 40, 3.5); drawPanel(); buzz(ctrls[0], 0.6, 80); buzz(ctrls[1], 0.6, 80); say('🏀 Canestro! +' + G.pts + (G.pts === 3 ? ' (da 3!)' : '')); setTimeout(() => say(''), 1000); }
     if (G.t > 3 || (G.scoredThis && G.scoreT !== undefined && G.t - G.scoreT > 0.9) || (p.y < 0.13 && Math.hypot(v.x, v.y, v.z) < 0.5 && G.t > 0.5) || Math.abs(p.x) > 6 || p.z < -8) bbRespawn(); }
   G.prevY = p.y;
+  if (G.bg) { let near = false; if (renderer.xr.isPresenting && G.state === 'ready') ctrls.forEach((c, i) => { if (handPos(i, 'point').distanceTo(G.bm.position) < 0.5) { near = true; if (!G.near) buzz(c, 0.3, 25); } }); G.near = near; G.bg.material.opacity = near ? 0.95 : 0.3; G.bg.scale.setScalar(near ? 1.0 : 0.55); }
   if (!renderer.xr.isPresenting) { const pw = Math.round(cl((G.mouse.y - 0.75) / 0.9, 0, 1) * 10), t = 'Tiro da ' + G.pts + ' punti · Mouse: mira e potenza · Click: tira · Potenza ' + '▮'.repeat(pw) + '·'.repeat(10 - pw) + ' (5 = ideale)'; if (t !== G.hintTxt) { G.hintTxt = t; $('hint').textContent = t; } }
   else if (G.hintTxt !== 'vr') { G.hintTxt = 'vr'; $('hint').textContent = 'Afferra la palla (grilletto, tasto laterale o pizzico) · lanciala muovendo il braccio'; }
 }
@@ -516,16 +554,42 @@ function finishBasket() {
 // ---- CALCIO: 5 rigori contro un portiere zombie. Desktop: mouse = mira, click = tira. VR: raggio del controller sulla porta + grilletto ----
 const GZ = -6.2, GHW = 2.0, GHH = 2.0, CBR = 0.11, SPOT_Z = -1.5, SHOTS = 5;
 function zombieMesh() {
-  const g = new THREE.Group(), M2 = (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 1 }), skin = M2(0x6f9a5c), dark = M2(0x3f6a3a), cloth = M2(0x3a2a4a), rag = M2(0x5a3a2a), red = new THREE.MeshBasicMaterial({ color: 0xff2020 });
+  const g = new THREE.Group(), M2 = (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 1 }), skin = M2(0x6f9a5c), dark = M2(0x3f6a3a), cloth = M2(0x3a2a4a), rag = M2(0x5a3a2a), hair = M2(0x1a2a14), red = new THREE.MeshBasicMaterial({ color: 0xff2020 });
   const bx = (w, h, d, m, x, y, z, par = g) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); par.add(o); return o; };
-  bx(0.55, 0.75, 0.28, cloth, 0, 1.15, 0); bx(0.2, 0.3, 0.29, skin, 0.12, 1.05, 0); bx(0.1, 0.32, 0.29, rag, -0.17, 0.68, 0); bx(0.12, 0.25, 0.29, rag, 0.05, 0.72, 0);
-  bx(0.2, 0.75, 0.22, skin, -0.14, 0.38, 0); bx(0.2, 0.75, 0.22, skin, 0.14, 0.38, 0); bx(0.22, 0.1, 0.34, dark, -0.14, 0.05, 0.06); bx(0.22, 0.1, 0.34, dark, 0.14, 0.05, 0.06);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.19, 12, 10), skin); head.position.set(0, 1.74, 0.02); g.add(head);
-  bx(0.17, 0.05, 0.16, dark, 0, 1.6, 0.08); bx(0.08, 0.04, 0.05, M2(0x1a2a14), -0.07, 1.9, 0.0); bx(0.1, 0.04, 0.06, M2(0x1a2a14), 0.06, 1.91, -0.04);
-  [-0.07, 0.07].forEach((x) => { const e = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 6), red); e.position.set(x, 1.77, 0.18); g.add(e); const gl = glow(0xff2020, 0.35, 0.9); gl.position.set(x, 1.77, 0.2); g.add(gl); });
-  g.userData.arms = [-1, 1].map((sx) => { const pv = new THREE.Group(); pv.position.set(sx * 0.33, 1.45, 0); g.add(pv); bx(0.12, 0.12, 0.75, skin, 0, 0, 0.35, pv); bx(0.15, 0.15, 0.14, dark, 0, 0, 0.78, pv); return pv; });
+  const hip = new THREE.Group(); hip.position.y = 0.8; g.add(hip); // busto: si piega e si inclina
+  bx(0.55, 0.75, 0.28, cloth, 0, 0.35, 0, hip); bx(0.2, 0.3, 0.29, skin, 0.12, 0.25, 0, hip); bx(0.1, 0.32, 0.29, rag, -0.17, -0.12, 0, hip); bx(0.12, 0.25, 0.29, rag, 0.05, -0.08, 0, hip);
+  const head = new THREE.Group(); head.position.set(0, 0.82, 0); hip.add(head);
+  const sk = new THREE.Mesh(new THREE.SphereGeometry(0.19, 12, 10), skin); sk.position.set(0, 0.12, 0.02); head.add(sk);
+  bx(0.17, 0.05, 0.16, dark, 0, -0.02, 0.08, head); bx(0.08, 0.04, 0.05, hair, -0.07, 0.3, 0.0, head); bx(0.1, 0.04, 0.06, hair, 0.06, 0.31, -0.04, head);
+  const eyes = [-0.07, 0.07].map((x) => { const e = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 6), red); e.position.set(x, 0.15, 0.18); head.add(e); const gl = glow(0xff2020, 0.35, 0.9); gl.position.set(x, 0.15, 0.2); head.add(gl); return gl; });
+  const arms = [-1, 1].map((sx) => { const pv = new THREE.Group(); pv.position.set(sx * 0.33, 0.65, 0); hip.add(pv); bx(0.12, 0.12, 0.75, skin, 0, 0, 0.35, pv); bx(0.15, 0.15, 0.14, dark, 0, 0, 0.78, pv); return pv; });
+  const legs = [-1, 1].map((sx) => { const pv = new THREE.Group(); pv.position.set(sx * 0.14, 0.8, 0); g.add(pv); bx(0.2, 0.75, 0.22, skin, 0, -0.42, 0, pv); bx(0.22, 0.1, 0.34, dark, 0, -0.75, 0.06, pv); return pv; });
   const aura = glow(0x5dff7a, 2.4, 0.16); aura.position.set(0, 1.0, -0.2); g.add(aura);
+  g.userData = { hip, head, arms, legs, eyes, aura, p: { tilt: 0, up: 0.3, slump: 0, legA: 0, lean: 0, jump: 0, bob: 0, tf: 0 } };
   return g;
+}
+// animazione dello zombie: dondola in attesa, si tuffa con le braccia alzate, esulta dopo una parata, crolla dopo un gol
+function zombieAnim(dt) {
+  const z = G.zm, u = z.userData, P = u.p, c = G.clk, st = G.state, sm = (x) => { x = cl(x, 0, 1); return x * x * (3 - 2 * x); };
+  let tilt = 0, up = 0.3 + 0.1 * Math.sin(c * 3), slump = 0, bob = 0, legA = 0, lean = 0, jump = 0;
+  if (st === 'ready' || st === 'windup') { bob = 0.03 * Math.abs(Math.sin(c * 4)); legA = Math.sin(c * 4) * 0.4; lean = 0.07 * Math.sin(c * 2); }
+  else if (st === 'flight') { const s = sm((G.t - 0.2) / 0.45), dir = Math.sign(G.xT - G.x0) || 1; tilt = P.tf = -(G.xT - G.x0) * 0.45 * s; up = 0.5 + 1.1 * s; lean = 0.25 * s; legA = 0.7 * s * dir; }
+  else if (st === 'result') { const k = G.lastKind; tilt = P.tf * (k === 'save' ? 0.3 : 1);
+    if (k === 'goal') { slump = 1; up = -0.2; } else if (k === 'save') { up = 1.7; jump = 0.14 * Math.abs(Math.sin(G.rt * 9)); bob = 0.02 * Math.sin(c * 20); } else { up = 0.8; lean = -0.1; } }
+  const k = Math.min(1, 10 * dt), L = (a, b) => a + (b - a) * k;
+  P.tilt = L(P.tilt, tilt); P.up = L(P.up, up); P.slump = L(P.slump, slump); P.legA = L(P.legA, legA); P.lean = L(P.lean, lean); P.jump = jump; P.bob = bob;
+  z.rotation.z = P.tilt; u.hip.rotation.x = P.lean + P.slump * 0.55; u.head.rotation.x = P.slump * 0.6 + 0.05 * Math.sin(c * 3); u.head.rotation.z = 0.12 * Math.sin(c * 1.7);
+  u.arms.forEach((a, i) => { a.rotation.x = -P.up * 1.2 + 0.15 * Math.sin(c * 3 + i * 1.7); a.rotation.z = (i ? 1 : -1) * P.up * 0.35; });
+  u.legs.forEach((l, i) => (l.rotation.x = P.legA * (i ? 1 : -1)));
+  u.eyes.forEach((e) => e.scale.setScalar(0.35 * (0.9 + 0.1 * Math.sin(c * 12))));
+}
+// gamba che calcia (solo desktop) e anello pulsante sul dischetto
+function footAnim(dt) {
+  const f = G.foot, st = G.state; if (!f) return;
+  f.visible = !renderer.xr.isPresenting && (st === 'windup' || (st === 'flight' && G.t < 0.35));
+  if (st === 'windup') { G.wt += dt; const u = cl(G.wt / 0.14, 0, 1); f.rotation.x = -0.95 + 1.45 * u * u; if (G.wt >= 0.14) { G.state = 'ready'; calcioKick(G.wk.tx, G.wk.ty); } }
+  else if (st === 'flight') f.rotation.x = Math.min(1.1, 0.5 + G.t * 3);
+  if (G.ring) { G.ring.visible = st === 'ready'; G.ring.scale.setScalar(1 + 0.08 * Math.sin(G.clk * 5)); }
 }
 function pitchTex() { return mkTex(512, 384, (g, w, h) => { g.fillStyle = '#1f5a2a'; g.fillRect(0, 0, w, h); for (let i = 0; i < 12; i++) { g.fillStyle = i % 2 ? 'rgba(0,0,0,.08)' : 'rgba(255,255,255,.04)'; g.fillRect(i * 43, 0, 43, h); }
   g.strokeStyle = '#e8e8e8'; g.lineWidth = 3; const gy = 55; g.beginPath(); g.moveTo(0, gy); g.lineTo(w, gy); g.stroke(); g.strokeRect(128, gy, 256, 150); g.beginPath(); g.arc(256, 256, 4, 0, 7); g.fillStyle = '#fff'; g.fill(); speck(g, w, h, 2500, 0.18); }); }
@@ -548,7 +612,7 @@ function initCalcio() {
   const white = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.5, emissive: 0x444444 });
   const post = (x) => { const m = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, GHH, 10), white); m.position.set(x, GHH / 2, GZ); stage.add(m); };
   post(-GHW); post(GHW); const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, GHW * 2 + 0.12, 10), white); bar.rotation.z = Math.PI / 2; bar.position.set(0, GHH, GZ); stage.add(bar);
-  const nb = new THREE.Mesh(new THREE.PlaneGeometry(GHW * 2, GHH), netMat(10, 5)); nb.position.set(0, GHH / 2, GZ - 1.2); stage.add(nb);
+  const nb = new THREE.Mesh(new THREE.PlaneGeometry(GHW * 2, GHH), netMat(10, 5)); nb.position.set(0, GHH / 2, GZ - 1.2); stage.add(nb); G.nb = nb; G.netP = 0; G.cheer = 0;
   [-1, 1].forEach((sx) => { const ns = new THREE.Mesh(new THREE.PlaneGeometry(1.2, GHH), netMat(6, 5)); ns.rotation.y = Math.PI / 2; ns.position.set(sx * GHW, GHH / 2, GZ - 0.6); stage.add(ns); });
   const nt = new THREE.Mesh(new THREE.PlaneGeometry(GHW * 2, 1.2), netMat(10, 6)); nt.rotation.x = Math.PI / 2; nt.position.set(0, GHH, GZ - 0.6); stage.add(nt);
   const fb = body(RAPIER.RigidBodyDesc.fixed()), col = (hx, hy, hz, x, y, z, r) => world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setRestitution(r), fb);
@@ -560,12 +624,15 @@ function initCalcio() {
   G.ball = body(RAPIER.RigidBodyDesc.dynamic().setCcdEnabled(true).setTranslation(0, G.sp.y + CBR + 0.02, G.sp.z)); world.createCollider(RAPIER.ColliderDesc.ball(CBR).setRestitution(0.55).setDensity(0.6), G.ball);
   G.bm = new THREE.Mesh(new THREE.SphereGeometry(CBR, 16, 12), new THREE.MeshStandardMaterial({ roughness: 0.6, map: mkTex(128, 64, (g, w, h) => { g.fillStyle = '#f4f4f4'; g.fillRect(0, 0, w, h); g.fillStyle = '#151515'; for (let i = 0; i < 6; i++) { g.beginPath(); g.arc(10 + i * 22, 14 + (i % 2) * 34, 9, 0, 7); g.fill(); } }) })); stage.add(G.bm);
   G.bm.add(glow(0xffffff, 0.45, 0.25));
-  G.cross = new THREE.Mesh(new THREE.RingGeometry(0.13, 0.17, 24), new THREE.MeshBasicMaterial({ color: 0xffa030, transparent: true, opacity: 0.9, depthTest: false })); G.cross.renderOrder = 5; G.cross.visible = !vr; stage.add(G.cross);
+  G.cross = new THREE.Mesh(new THREE.RingGeometry(0.13, 0.17, 24), new THREE.MeshBasicMaterial({ color: 0xffa030, transparent: true, opacity: 0.9, depthTest: false })); G.cross.renderOrder = 5; G.cross.visible = true; stage.add(G.cross);
+  G.foot = new THREE.Group(); { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.62, 0.16), new THREE.MeshStandardMaterial({ color: 0x3f6a3a, roughness: 1 })), boot = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.1, 0.3), new THREE.MeshStandardMaterial({ color: 0x1a1020, roughness: 0.6 })); leg.position.y = -0.31; boot.position.set(0, -0.66, -0.07); G.foot.add(leg, boot); }
+  G.foot.position.set(0.04, 0.72, G.sp.z + 0.3); G.foot.visible = false; stage.add(G.foot); G.wt = 0;
+  G.ring = new THREE.Mesh(new THREE.RingGeometry(0.2, 0.25, 32), new THREE.MeshBasicMaterial({ color: 0xffa030, transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthWrite: false })); G.ring.rotation.x = -Math.PI / 2; G.ring.position.set(0, G.sp.y + 0.02, G.sp.z); stage.add(G.ring);
   calcioRespawn(); drawPanel();
 }
 function calcioRespawn() {
   G.ball.setTranslation({ x: 0, y: G.sp.y + CBR + 0.02, z: G.sp.z }, true); G.ball.setLinvel({ x: 0, y: 0, z: 0 }, true); G.ball.setAngvel({ x: 0, y: 0, z: 0 }, true); G.ball.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
-  G.state = 'ready'; G.t = 0; G.saved = false; G.jump = 0; G.zm.rotation.z = 0;
+  G.state = 'ready'; G.t = 0; G.saved = false; G.jump = 0;
 }
 function calcioAim() { G.tx = (G.mouse.x / 0.9) * GHW * 1.05; G.ty = 0.12 + ((G.mouse.y - 0.75) / 0.9) * 1.9; }
 function calcioKick(tx, ty, Tov) {
@@ -577,14 +644,15 @@ function calcioKick(tx, ty, Tov) {
   G.xT = Math.random() < 0.5 ? cl(tx, -1.7, 1.7) : (Math.random() < 0.3 ? 0 : (Math.random() < 0.5 ? -1 : 1) * rr(0.8, 1.6));
   G.jump = (Math.random() < 0.5 ? ty > 1.3 : Math.random() < 0.3) ? 0.3 : 0;
 }
-function calcioSwing(v, bp, i) { // VR: la direzione e la forza del calcio vengono dal movimento della mano/controller
-  const dir = v.clone().normalize(), t = (GZ - bp.z) / dir.z, sp = v.length();
-  calcioKick(cl(bp.x + dir.x * t * 0.85, -2.8, 2.8), cl(bp.y + dir.y * t * 0.85, 0.1, 2.3), cl(1.1 - sp * 0.14, 0.45, 0.9)); buzz(ctrls[i], 1, 80);
+function calcioSwing(v, bp, i) { // VR: direzione e forza del calcio dal movimento della mano, con mira assistita verso la porta
+  const sp = v.length(), dist = bp.z - GZ, sx = cl(v.x / Math.max(0.3, -v.z), -0.6, 0.6), sy = cl(v.y / Math.max(0.3, -v.z), -0.25, 0.4);
+  const tx = cl(bp.x + sx * dist * 0.85, -2.8, 2.8), ty = cl(bp.y + sy * dist * 0.85 + 0.25, 0.15, 2.2);
+  calcioKick(tx, ty, cl(1.05 - sp * 0.12, 0.45, 0.95)); buzz(ctrls[i], 1, 80);
 }
 function calcioClick(e) {
   if (!G || G.id !== 'calcio' || mode !== 'game' || paused || G.over || renderer.xr.isPresenting || G.state !== 'ready') return;
   ray.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera); if (ray.intersectObjects(buttons)[0]) return;
-  calcioAim(); calcioKick(G.tx, G.ty);
+  calcioAim(); G.wk = { tx: G.tx, ty: G.ty }; G.state = 'windup'; G.wt = 0;
 }
 ctrls.forEach((c) => c.addEventListener('selectstart', () => {
   if (!G || G.id !== 'calcio' || G.state !== 'ready' || !renderer.xr.isPresenting || paused || G.over) return;
@@ -594,18 +662,20 @@ ctrls.forEach((c) => c.addEventListener('selectstart', () => {
 }));
 function calcioResult(kind) {
   { const bp = G.ball.translation(); burst(bp.x, Math.max(0.3, bp.y), bp.z, kind === 'goal' ? 0x5dff7a : kind === 'save' ? 0xb36bff : 0xff6a30, kind === 'goal' ? 50 : 22, 3.5); }
-  G.state = 'result'; G.rt = 1.6; G.shots++; if (kind === 'goal') G.goals++;
+  G.state = 'result'; G.rt = 1.6; G.shots++; G.lastKind = kind; if (kind === 'goal') { G.goals++; G.netP = 1; G.cheer = 1.5; for (let i = 0; i < 4; i++) burst(rr(-2, 2), rr(1, 3), GZ + 0.5, [0xffa030, 0x5dff7a, 0xb36bff, 0xffd54a][i], 24, 3); ctrls.forEach((c) => buzz(c, 0.8, 120)); }
   say(kind === 'goal' ? '⚽ GOL!' : kind === 'save' ? '🧟 Parata dello zombie!' : 'Fuori!'); drawPanel();
 }
 function calcioUpdate(dt) {
   G.clk += dt; const ss = (x) => { x = cl(x, 0, 1); return x * x * (3 - 2 * x); };
-  if (G.state === 'ready') { G.kx = 0.5 * Math.sin(G.clk * 2); G.ky = 0.95; }
-  else if (G.state === 'flight') { const s = ss((G.t - 0.3) / 0.45); G.kx = G.x0 + (G.xT - G.x0) * s; G.ky = 0.95 + G.jump * s; G.zm.rotation.z = -(G.xT - G.x0) * 0.3 * s; }
-  if (renderer.xr.isPresenting && G.state === 'ready' && !G.over) { const bp = G.ball.translation(), bv = new THREE.Vector3(bp.x, bp.y, bp.z);
-    for (let i = 0; i < 2; i++) { const s = hv[i]; if (s.ok && handPos(i, 'paddle').distanceTo(bv) < 0.26 && s.v.length() > 1.4 && s.v.z < -0.3) { calcioSwing(s.v, bp, i); break; } } }
-  { const ar = G.zm.userData.arms, up = G.state === 'flight' ? Math.min(1, G.t * 3) : 0; ar.forEach((a, i) => { a.rotation.x = -0.15 * Math.sin(G.clk * 3 + i * 1.7) - up * 1.2; a.rotation.z = (i ? 1 : -1) * up * 0.5; });
-    G.cd.forEach((c, i) => { _m4.compose(_p.set(c.x, 0.3 + 0.25 * Math.sin(G.clk * 1.5 + c.ph), c.z), _q.identity(), _s.set(c.s, c.s, c.s)); G.crowd.setMatrixAt(i, _m4); }); G.crowd.instanceMatrix.needsUpdate = true; }
-  G.kb.setNextKinematicTranslation({ x: G.kx, y: G.ky, z: GZ + 0.3 }); G.zm.position.set(G.kx, G.ky - 0.95, GZ + 0.3);
+  if (G.state === 'ready' || G.state === 'windup') { G.kx += (0.5 * Math.sin(G.clk * 2) - G.kx) * Math.min(1, 4 * dt); G.ky += (0.95 - G.ky) * Math.min(1, 6 * dt); }
+  else if (G.state === 'flight') { const s = ss((G.t - 0.2) / 0.45); G.kx = G.x0 + (G.xT - G.x0) * s; G.ky = 0.95 + G.jump * s; }
+  else if (G.state === 'result') G.ky += (0.95 - G.ky) * Math.min(1, 6 * dt);
+  if (renderer.xr.isPresenting && G.state === 'ready' && !G.over) { const bp = G.ball.translation(), bv = new THREE.Vector3(bp.x, bp.y, bp.z); // controllo "swept": la mano colpisce anche se passa veloce tra due frame
+    for (let i = 0; i < 2; i++) { const s = hv[i]; if (s.ok && segDist(bv, s.prev, s.p) < 0.3 && s.v.length() > 0.9 && s.v.z < -0.15) { calcioSwing(s.v, bp, i); break; } } }
+  zombieAnim(dt); footAnim(dt);
+  G.cheer = Math.max(0, G.cheer - dt * 0.8); G.netP = Math.max(0, G.netP - dt * 1.2); G.nb.position.z = GZ - 1.2 - 0.35 * G.netP * Math.sin(G.netP * 14);
+  { const ch = G.cheer; G.cd.forEach((c, i) => { _m4.compose(_p.set(c.x, 0.3 + (0.25 + 0.5 * ch) * Math.sin(G.clk * (1.5 + 4 * ch) + c.ph), c.z), _q.identity(), _s.set(c.s, c.s, c.s)); G.crowd.setMatrixAt(i, _m4); }); G.crowd.instanceMatrix.needsUpdate = true; }
+  G.kb.setNextKinematicTranslation({ x: G.kx, y: G.ky, z: GZ + 0.3 }); G.zm.position.set(G.kx, G.ky - 0.95 + G.zm.userData.p.jump + G.zm.userData.p.bob, GZ + 0.3);
   acc += dt; let n = 0; while (acc >= STEP && n++ < 4) { world.step(); acc -= STEP; }
   const b = G.ball, p = b.translation(), q = b.rotation(); G.bm.position.set(p.x, p.y, p.z); G.bm.quaternion.set(q.x, q.y, q.z, q.w);
   if (G.state === 'flight') { G.t += dt;
@@ -614,7 +684,9 @@ function calcioUpdate(dt) {
     else if (G.t > 3) calcioResult('miss'); }
   else if (G.state === 'result') { G.rt -= dt; if (G.rt <= 0) { say(''); if (G.shots >= SHOTS) finishCalcio(); else calcioRespawn(); } }
   if (!renderer.xr.isPresenting) { calcioAim(); G.cross.position.set(cl(G.tx, -2.6, 2.6), cl(G.ty, 0.05, 2.4), GZ + 0.1); G.cross.visible = G.state === 'ready'; const t = 'Mouse: punta nella porta · Click: tira'; if (G.hintTxt !== t) { G.hintTxt = t; $('hint').textContent = t; } }
-  else if (G.hintTxt !== 'vr') { G.hintTxt = 'vr'; $('hint').textContent = 'Calcia la palla con un movimento del braccio (o punta il raggio e premi il grilletto)'; }
+  else { if (G.hintTxt !== 'vr') { G.hintTxt = 'vr'; $('hint').textContent = 'Calcia la palla con un movimento del braccio (o punta il raggio e premi il grilletto)'; }
+    const ci = Math.max(0, ctrls.findIndex((c) => c.userData.hand === 'right')), cc = ctrls[ci], o = cc.getWorldPosition(new THREE.Vector3()), d = new THREE.Vector3(0, 0, -1).transformDirection(cc.matrixWorld);
+    if (d.z < -0.05) { const t = (GZ - o.z) / d.z; G.cross.position.set(cl(o.x + d.x * t, -2.6, 2.6), cl(o.y + d.y * t, 0.05, 2.4), GZ + 0.1); } G.cross.visible = G.state === 'ready' && d.z < -0.05; }
 }
 function finishCalcio() {
   G.over = true; const s = store.get(), r = s.calcio || { best: 0, played: 0 }; r.played++; r.best = Math.max(r.best, G.goals); s.calcio = r; store.set(s);
@@ -727,7 +799,7 @@ renderer.setAnimationLoop(() => {
   if (!renderer.xr.isPresenting && mode === 'menu') { rig.rotation.y = yaw; camera.rotation.x = pitch;
     rig.translateZ(-((keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0)) * 3 * dt); rig.translateX(((keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0)) * 3 * dt); }
   if (mode === 'game' && G && !paused && !G.over) (G.id === 'basket' ? bbUpdate(dt) : G.id === 'calcio' ? calcioUpdate(dt) : G.id === 'climb' ? climbUpdate(dt) : ppUpdate(dt));
-  env.update(clock.elapsedTime); fx.update(clock.elapsedTime); updateParticles(dt); updateFlames(clock.elapsedTime); trail(); grade.uniforms.uT.value = 1 + (clock.elapsedTime % 7);
+  updateVis(); env.update(clock.elapsedTime); fx.update(clock.elapsedTime); updateParticles(dt); updateFlames(clock.elapsedTime); trail(); grade.uniforms.uT.value = 1 + (clock.elapsedTime % 7);
   if (renderer.xr.isPresenting) renderer.render(scene, camera); else composer.render();
 });
 toMenu();
